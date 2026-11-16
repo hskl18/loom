@@ -5,6 +5,9 @@ returned."""
 
 from __future__ import annotations
 
+import base64
+import json
+import os
 from collections.abc import AsyncGenerator
 from typing import Any
 
@@ -70,12 +73,14 @@ async def test_a_saved_turn_reaches_a_later_prompt(agent) -> None:
     service = LoomMemoryService(agent, app_name="travel", honour_abstain=False, defer=False)
     await _turn(service, "alice", "I fly to Lisbon every month.")
 
-    async def recalled() -> bool:
-        prompt = await _turn(service, "alice", "Where does Alice fly every month?")
-        return "lisbon" in prompt.lower()
+    async def saved() -> bool:
+        found = await service.search_memory(app_name="travel", user_id="alice", query="Lisbon")
+        return any(m.custom_metadata["source"] == "fact" for m in found.memories)
 
     # A write is searchable once its embedding lands; eventually raises on timeout.
-    await eventually(recalled, description="'lisbon' in the next session's prompt")
+    await eventually(saved, description="the saved turn's fact")
+    prompt = await _turn(service, "alice", "Where does Alice fly every month?")
+    assert "lisbon" in prompt.lower()
     found = await service.search_memory(app_name="travel", user_id="bob", query="Lisbon")
     assert not found.memories
     found = await service.search_memory(app_name="travel", user_id="alice", query="Lisbon")
@@ -116,6 +121,10 @@ async def test_add_memory_then_delete_by_id(agent) -> None:
         [],
     ]
     assert row["valid_at"].startswith("2026-03-01")
+    # The server stamps the actor from the token: its subject, as `<kind>:<subject>`.
+    claims = os.environ["LOOM_API_KEY"].split(".")[1]
+    subject = json.loads(base64.urlsafe_b64decode(claims + "=" * (-len(claims) % 4)))["sub"]
+    assert row["actor"].endswith(f":{subject}")
     await service.delete_memory(app_name="travel", user_id="bob", memory_id=memory_id)
     assert await ids("alice") == [memory_id]  # another user's delete reaches nothing
     await service.delete_memory(app_name="travel", user_id="alice", memory_id=memory_id)

@@ -12,13 +12,14 @@ from typing import Any
 
 import pytest
 from google.adk.agents import LlmAgent
+from google.adk.events import Event, EventActions
 from google.adk.memory import BaseMemoryService
 from google.adk.memory.memory_entry import MemoryEntry
 from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService
+from google.adk.sessions import InMemorySessionService, Session
 from google.adk.tools import load_memory, preload_memory
 from google.genai import types
 from loom import Agent, SyncAgent
@@ -215,7 +216,7 @@ def test_a_saved_session_goes_to_extraction() -> None:
     ]
     assert all(str(m["timestamp"]).endswith("+00:00") for m in messages)
     # The session keys Loom's evidence of the turns.
-    assert extract[2] == {"user_id": "alice", "session_id": session.id, "defer": True}
+    assert extract[2] == {"user_id": "alice", "session_id": f"alice/{session.id}", "defer": True}
 
 
 def test_the_documented_turn_callback_sends_each_turn_once() -> None:
@@ -239,14 +240,11 @@ def test_the_documented_turn_callback_sends_each_turn_once() -> None:
     calls = [c for c in fake.calls if c[0] == "set_from_messages"]
     sent = [[m["content"] for m in c[1][0]] for c in calls]
     assert sent == [["I prefer aisle seats", "Noted."], ["I fly to Lisbon", "Lisbon, then."]]
-    # ADK's context passes the session, which keys Loom's evidence of each turn.
-    assert [c[2]["session_id"] for c in calls] == [session.id, session.id]
+    # ADK's context passes the session; Loom's session is per user.
+    assert [c[2]["session_id"] for c in calls] == [f"alice/{session.id}"] * 2
 
 
 def test_extraction_leaves_out_thoughts_tool_calls_and_rewound_turns() -> None:
-    from google.adk.events import Event, EventActions
-    from google.adk.sessions import Session
-
     def event(inv: str, author: str, *parts: types.Part, **kw: Any) -> Event:
         return Event(
             invocation_id=inv, author=author, content=types.Content(parts=list(parts)), **kw
@@ -280,8 +278,6 @@ def test_extraction_leaves_out_thoughts_tool_calls_and_rewound_turns() -> None:
 
 
 def test_events_given_leave_out_a_turn_rewound_among_them() -> None:
-    from google.adk.events import Event, EventActions
-
     events = [
         Event(invocation_id="i1", author="user", content=_user("I live in Lisbon")),
         Event(invocation_id="i2", author="user", content=_user("Actually Porto")),
@@ -299,16 +295,14 @@ def test_events_given_leave_out_a_turn_rewound_among_them() -> None:
     )
     ((_, (messages,), kw),) = fake.calls
     assert [m["content"] for m in messages] == ["I live in Lisbon"]
-    assert kw["session_id"] == "s1"
+    assert kw["session_id"] == "alice/s1"
 
 
 def test_events_without_text_send_nothing() -> None:
-    from google.adk.events import Event
-
     fake = _FakeMemory()
     silent = Event(author="user", content=types.Content(parts=[types.Part(text=" ")]))
     asyncio.run(
-        _service(fake, defer=False).add_events_to_memory(
+        _service(fake).add_events_to_memory(
             app_name="travel", user_id="u", events=[silent], session_id="s1"
         )
     )
@@ -316,8 +310,6 @@ def test_events_without_text_send_nothing() -> None:
 
 
 def test_events_without_a_session_are_refused() -> None:
-    from google.adk.events import Event
-
     fake = _FakeMemory()
     event = Event(author="user", content=_user("I live in Lisbon"))
     with pytest.raises(ValueError, match="session_id"):
@@ -367,8 +359,6 @@ def test_delete_memory_deletes_the_key_and_needs_one() -> None:
 
 
 def test_a_call_for_another_app_is_refused() -> None:
-    from google.adk.sessions import Session
-
     fake = _FakeMemory()
     service = _service(fake)
     calls = [
@@ -411,8 +401,6 @@ def test_a_real_agent_posts_the_service_calls() -> None:
         posts.append((path, dict(payload)))
         return {"results": []}
 
-    from google.adk.events import Event
-
     agent = Agent(org="acme", namespace="travel", agent="bot", base_url="http://x", api_key="k")
     agent.transport.post = post  # type: ignore[method-assign]
     service = LoomMemoryService(agent, app_name="travel", top_k=3)
@@ -436,20 +424,17 @@ def test_a_real_agent_posts_the_service_calls() -> None:
         "full",
         False,
     )
-    assert (extract["user_id"], extract["session_id"]) == ("alice", "s1")
+    assert (extract["user_id"], extract["session_id"]) == ("alice", "alice/s1")
     assert [m["content"] for m in extract["messages"]] == ["I prefer aisle seats"]
     assert write["memory_key"].startswith("adk/") and write["user_id"] == "alice"
 
 
 @pytest.mark.parametrize("user", ["", "-"])
 def test_a_user_id_that_names_no_loom_user_is_refused(user: str) -> None:
-    from google.adk.events import Event
-
     fake = _FakeMemory()
     service = _service(fake)
     entry = MemoryEntry(content=_user("Alice prefers aisle seats"))
     event = Event(author="user", content=_user("I prefer aisle seats"))
-    from google.adk.sessions import Session
 
     calls = [
         service.add_session_to_memory(Session(id="s", app_name="travel", user_id=user)),

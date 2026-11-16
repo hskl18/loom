@@ -34,7 +34,7 @@ service a ``Runner`` takes as ``memory_service=``. ADK's memory tools read it:
 ADK scopes memory by app and user. Loom's boundary is the namespace, so a
 service serves one ADK app, the namespace of its Loom agent, and refuses a
 call for another app; the ADK user is the Loom ``user_id``, and extraction
-runs under the ADK session. Install with
+runs under the Loom session ``<user>/<ADK session id>``. Install with
 ``pip install 'clickhouse-loom[google-adk]'``.
 """
 
@@ -114,7 +114,7 @@ class LoomMemoryService(BaseMemoryService):
     ) -> None:
         self._check(app_name, user_id)
         if not session_id:
-            # Loom keys a turn's chunks and summary by session, not by user.
+            # Loom files a turn's verbatim chunks by session alone, not by user.
             raise ValueError("add_events_to_memory needs the ADK session_id")
         await self._extract(user_id, session_id, get_active_events(list(events)))
 
@@ -213,7 +213,11 @@ class LoomMemoryService(BaseMemoryService):
                 )
         if messages:
             await self._agent.memory.set_from_messages(
-                messages, user_id=user_id, session_id=session_id, defer=self._defer
+                messages,
+                user_id=user_id,
+                # ADK makes a session id unique per user only; Loom files chunks by session alone.
+                session_id=f"{user_id}/{session_id}",
+                defer=self._defer,
             )
 
 
