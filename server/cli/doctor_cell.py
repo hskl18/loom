@@ -186,7 +186,10 @@ async def _checks(ch: Any, allowed_roles: tuple[str, ...] = ()) -> list[tuple[st
     try:
         reads: list[tuple[str, str, str]] = await _bounded(_writer_reads(allowed_roles))
     except Exception as e:  # noqa: BLE001 — an unread catalog is named, not a failed run
-        reads = [("cell_tenancy_privilege", WARN, f"not read: {_reason(e)}")]
+        reads = [
+            (name, WARN, f"not read: {_reason(e)}")
+            for name in ("cell_tenancy_privilege", "cell_unchecked_writers")
+        ]
     return _grades(state, marked, marks_all, defects) + reads
 
 
@@ -264,6 +267,7 @@ async def _stray_reads(ch: Any, budget_s: float) -> list[tuple[str, str, str]]:
     budget = cell_scan.Budget(budget_s)
     stray: dict[str, list[str]] = {}
     unchecked: list[str] = []
+    refused: list[str] = []
     for i, (_n, store, table) in enumerate(work):
         found = cell_scan.ScanResult()
         name = table if store == "postgres" else table.canonical
@@ -274,9 +278,15 @@ async def _stray_reads(ch: Any, budget_s: float) -> list[tuple[str, str, str]]:
             else:
                 for raw in await cell_scan.ch_orgs(ch, table, topology, budget):
                     found.add(name, raw)
-        except Refused:
-            unchecked += [w[2] if w[1] == "postgres" else w[2].canonical for w in work[i:]]
-            break
+        except Refused as e:
+            # The budget spent leaves this table and the larger ones unread; any other
+            # refusal (a table with no org-led index, a replica that cannot sync) names
+            # this table alone, and the read goes on.
+            if budget.left() <= 1:
+                unchecked += [w[2] if w[1] == "postgres" else w[2].canonical for w in work[i:]]
+                break
+            refused += [str(r) for r in e.refusals]
+            continue
         orgs = sorted(set(found.orgs) - held) + sorted(found.too_long)
         bad = [m for ms in found.malformed.values() for m in ms]
         if orgs or bad:
@@ -290,13 +300,20 @@ async def _stray_reads(ch: Any, budget_s: float) -> list[tuple[str, str, str]]:
             or "every org found has a tenancy row",
         )
     ]
-    if unchecked or problems:
+    if unchecked:
         out.append(
             (
                 "cell_stray_orgs_unchecked",
                 WARN,
-                f"not read within --stray-orgs-budget ({budget_s:g} s): "
-                + ", ".join(unchecked + [str(p) for p in problems]),
+                f"not read within --stray-orgs-budget ({budget_s:g} s): " + ", ".join(unchecked),
+            )
+        )
+    if refused or problems:
+        out.append(
+            (
+                "cell_stray_orgs_unread",
+                WARN,
+                "not read: " + "; ".join(refused + [str(p) for p in problems]),
             )
         )
     return out
@@ -305,8 +322,9 @@ async def _stray_reads(ch: Any, budget_s: float) -> list[tuple[str, str, str]]:
 def stray_org_checks(budget_s: float) -> list[tuple[str, str, str]]:
     """`loom doctor --stray-orgs`: the orgs the cell's stores hold without a tenancy row
     (log-only orgs, names no request can carry, rows an unchecked writer left), smallest
-    tables first within one budget, naming every table left unchecked. Never a FAIL: the
-    stray-org erase command removes what it names."""
+    tables first within one budget, naming every table left unchecked and every table it
+    could not read. Never a FAIL: the operator removes what it names by hand
+    (docs/operations/cell-attach.md)."""
     from server.cli._ch import connect_declared, disconnect
     from server.core.ch import get_client, statement_timeout
 

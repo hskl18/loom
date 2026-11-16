@@ -3,26 +3,27 @@
 docs/operations/cell-attach.md).
 
 A run holds the attach lock on a direct session of the cell's Postgres for its life, and
-goes, each step idempotent, so a rerun resumes by the directory row and the cell's mode:
+goes, each step idempotent, so a rerun resumes by the directory row and the cell's mode.
+Steps 1 to 4 are the design's, as cells.md numbers them:
 
-1. the directory row: on `serving` it is done (exit 0) once the cell reads `enforced`;
-2. the refusals, before any write: the stores are the registered ones, the session is
-   direct and marked, the cell's processes (their heartbeats), the roles, settings and
-   subscriptions that would let an unchecked writer through, the ClickHouse writers,
-   the table list, durability, attach's own grants;
-3. `attach/begin` (the router probes the stores and writes the fingerprints);
-4. the mode: `recording`, or `enforced` on a resume;
-5. the triggers (`cell_triggers.ensure_table`), under the migration lock one try at a time;
-6. in `recording`, step 2's scan, refusing an org past `cell.ORG_MAX_BYTES`, and the
-   tenancy rows of the orgs found; the triggers again; the pre-commit checks;
-7. step 3: `attach/enforced`, then the mode commit (never on a resume): from it on the mode
-   only rises, so every later refusal leaves the cell `enforced` and `attaching`;
-8. the durable read of `enforced`, the heartbeats, step 4's wait for every transaction
-   that could have read `recording`, the rescan, the tenancy rows and their placements
-   (`attach/place`), the final checks and `attach/serving`.
+- the directory row: on `serving` it is done (exit 0) once the cell reads `enforced`;
+- the refusals, before any write: the stores are the registered ones, the session is
+  direct and marked, the cell's processes (their heartbeats), the roles, settings and
+  subscriptions that would let an unchecked writer through, the ClickHouse writers, the
+  table list, durability, attach's own grants;
+- `attach/begin` (the router probes the stores and writes the fingerprints);
+- step 1, the mode: `recording`, or `enforced` on a resume;
+- the triggers (`cell_triggers.ensure_table`), under the migration lock one try at a time;
+- in `recording`: step 2, the scan, refusing an org past `cell.ORG_MAX_BYTES`, and the
+  tenancy rows of the orgs found; the triggers again; the pre-commit checks; step 3,
+  `attach/enforced` and the mode commit, from which on the mode only rises, so every
+  later refusal leaves the cell `enforced` and `attaching`;
+- the durable read of `enforced`, the heartbeats, and step 4: the wait for every
+  transaction that could have read `recording`, the rescan, the tenancy rows and their
+  placements (`attach/place`), the final checks and `attach/serving`.
 
-`--wait` bounds the waits, `--scan-budget` each full scan. `--dry-run` runs the refusals
-and the scan and prints what would be placed, writing nothing.
+`--wait` bounds the waits in wall time, `--scan-budget` each full scan. `--dry-run` runs
+the refusals and the scan and prints what would be placed, writing nothing.
 """
 
 from __future__ import annotations

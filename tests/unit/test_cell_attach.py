@@ -801,3 +801,30 @@ async def test_a_stop_between_a_landed_commit_and_the_durable_read_says_the_outc
     err = capsys.readouterr().err
     assert "the mode commit's outcome is unknown: rerun attach" in err
     assert "stays recording" not in err
+
+
+@pytest.mark.asyncio
+async def test_doctor_names_both_catalog_checks_when_the_catalog_is_unread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from server.cli import doctor_cell
+
+    async def before(_ch: Any) -> str:
+        return ""
+
+    async def marked() -> tuple[str, bool, list[Any]]:
+        return "enforced", True, []
+
+    async def unmarked() -> bool:
+        return False
+
+    async def unread(_roles: Any) -> Any:
+        raise OSError("the catalog read failed")
+
+    monkeypatch.setattr(doctor_cell, "_deployment_check", before)
+    monkeypatch.setattr(doctor_cell, "_marked_session", marked)
+    monkeypatch.setattr(doctor_cell, "_unmarked_session", unmarked)
+    monkeypatch.setattr(doctor_cell, "_writer_reads", unread)
+    lines = {n: (g, d) for n, g, d in await doctor_cell._checks(None)}
+    for name in ("cell_tenancy_privilege", "cell_unchecked_writers"):
+        assert lines[name] == ("WARN", "not read: OSError: the catalog read failed")

@@ -668,3 +668,23 @@ async def test_a_role_with_the_grants_but_not_the_owner_role_is_refused_before_a
             await conn.execute(f"DROP OWNED BY {role}")
         await _admin(f"DROP OWNED BY {role}")
         await _admin(f"DROP ROLE {role}")
+
+
+@pytest.mark.asyncio
+async def test_doctor_names_a_table_it_cannot_read_and_reads_the_rest(cell_stores) -> None:
+    from server.cli import doctor_cell
+
+    stores = cell_stores
+    await _prepare(stores, _Network())
+    tag = stores["tag"]
+    # An org table with no org-led index: its skip scan refuses, the read goes on.
+    await pg.execute("CREATE TABLE loom.it_no_org_index (id int PRIMARY KEY, org text)")
+    await pg.execute("INSERT INTO loom.it_no_org_index VALUES (1, $1)", tag + "unindexed")
+    await pg.execute(
+        "INSERT INTO loom.scope_generations (org, scope) VALUES ($1, '*')", tag + "stray"
+    )
+    lines = {n: (g, d) for n, g, d in await doctor_cell._stray_reads(stores["ch"], 300)}
+    assert tag + "stray" in lines["cell_stray_orgs"][1]
+    grade, detail = lines["cell_stray_orgs_unread"]
+    assert grade == "WARN" and "postgres loom.it_no_org_index" in detail
+    assert "cell_stray_orgs_unchecked" not in lines

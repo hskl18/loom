@@ -105,17 +105,16 @@ and `attaching`, and the cell goes forward: fix the cause and rerun attach. Unse
 always goes forward.
 
 From `enforced` on, a `--platform-admin` mint that declares a new org and the admin account
-routes cannot bring in a new org (`WRONG_CELL`) until `loom cell place` is available; an
-ordinary mint scoped to its org places the org on its first request. A direct call of the
-router's operator place route, or a live placement with the cell's credential, cannot read
-the cell's Postgres and is accepted once the directory mode is `enforced`; the cell's
-credential is the servers' alone.
+routes cannot bring in a new org (`WRONG_CELL`); an ordinary mint scoped to its org places
+the org on its first request. A direct call of the router's operator place route, or a live
+placement with the cell's credential, cannot read the cell's Postgres and is accepted once
+the directory mode is `enforced`; the cell's credential is the servers' alone.
 
 ## Orgs attach does not place
 
 - **An org longer than 2048 bytes** refuses step 2, naming it, before any tenancy row is
-  written. One first found in step 4 is skipped and named. Remove such an org by hand
-  until the stray-org erase command exists, in this order: its bucket objects, from the
+  written. One first found in step 4 is skipped and named. Remove such an org by hand, in
+  this order: its bucket objects, from the
   keys of its rows in `loom.documents`, `loom.document_blobs` and `loom.blob_uploads`, so no
   memory content is left outside erasure; then its rows in every table with an `org` column
   of both ClickHouse databases and of Postgres schema `loom`, the erasure ledger tables
@@ -128,9 +127,9 @@ credential is the servers' alone.
   erasure there.
 
 `loom doctor --stray-orgs` names the orgs the cell's stores hold without a tenancy row,
-smallest tables first within `--stray-orgs-budget` (default 60 s), and every table it left
-unchecked. `loom cell place` and `loom cell restore`, which act on these, are not available
-yet.
+smallest tables first within `--stray-orgs-budget` (default 60 s), every table the budget
+left unchecked and every table it could not read. Remove a stray org's rows by the same
+procedure as an over-long org's.
 
 ## After attach
 

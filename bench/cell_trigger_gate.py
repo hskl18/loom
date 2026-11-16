@@ -1,9 +1,10 @@
 """The first attach's trigger-cost gate, end to end: `memory.set` p50 and p99 through a server
 of an attached cell, and a delivery-sized 1,000-row insert of a held org from a marked and an
 unmarked session, with the cell's org triggers on and dropped in turn (the `loom.tenancy`
-guard stays). Run it against an attached cell's server, which must not serve anything else,
-with a writer token for a placed org; it drops and recreates the cell's org triggers, so
-never against a deployment in use. Needs no provider.
+guard stays), deleting the rows its inserts wrote at the end. Run it against an attached
+cell's server, which must not serve anything else, with a writer token for a placed org;
+it drops and recreates the cell's org triggers, so never against a deployment in use.
+Needs no provider.
 
     PYTHONPATH=$PWD .venv/bin/python bench/cell_trigger_gate.py \\
         --base-url http://127.0.0.1:7932 --pg-dsn <the cell's LOOM_PG_DSN> \\
@@ -36,7 +37,7 @@ async def _triggers(dsn: str, on: bool) -> None:
             for name in cell_triggers.ORG_TRIGGERS:
                 await conn.execute(f'DROP TRIGGER IF EXISTS {name} ON loom."{table}"')
                 if on:
-                    await conn.execute(cell_triggers._create(f'loom."{table}"', name))
+                    await conn.execute(cell_triggers.create_statement(table, name))
         enabled = await conn.fetchval(
             "SELECT count(*) FROM pg_trigger WHERE tgenabled = 'O' AND tgname = ANY($1::text[])",
             list(cell_triggers.ORG_TRIGGERS),
@@ -111,6 +112,18 @@ async def main() -> None:
                 )
     finally:
         await _triggers(args.pg_dsn, True)
+        await _clean(args)
+
+
+async def _clean(args: argparse.Namespace) -> None:
+    """Delete the rows the inserts wrote (the `memory.set` calls' rows stay the org's)."""
+    conn = await asyncpg.connect(args.pg_dsn, server_settings={"loom.tenancy_checked": "on"})
+    try:
+        await conn.execute(
+            "DELETE FROM loom.scope_generations WHERE org = $1 AND scope LIKE 'gate-%'", args.org
+        )
+    finally:
+        await conn.close()
 
 
 if __name__ == "__main__":

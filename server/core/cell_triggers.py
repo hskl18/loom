@@ -176,6 +176,11 @@ def _function_sql(function: str) -> re.Pattern[str]:
     )
 
 
+def create_statement(table: str, name: str) -> str:
+    """The CREATE TRIGGER for `name` on `loom.<table>`, as `ensure` writes it."""
+    return _create(f"loom.{_ident(table)}", name)
+
+
 def _create(qualified: str, name: str) -> str:
     """The CREATE TRIGGER for `name` on the table `qualified` names."""
     if name == TENANCY_TRIGGER:
