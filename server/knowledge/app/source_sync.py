@@ -7,9 +7,11 @@ and a mirrored folder source, has its own turn module (`source_sync_linear`,
 `_turn_of`, which builds on the public helpers here (`__all__`). A kind's own
 bookkeeping goes in `TurnResult.kind_state`, which the sync state keeps.
 
-A pass reads the active sources and drops those whose namespace is inactive.
-Sources a namespace's admin asked to sync (`sync_now`) go first, the rest from
-where the previous pass stopped. Each source's turn holds the source's own lease,
+A pass reads the active sources and drops those whose namespace is inactive. The
+mirrored sources go first, in at most a third of the pass and under their own document
+bound (`_sync_mirrored`); the namespace sources then have the rest. Sources a
+namespace's admin asked to sync (`sync_now`) go first, the rest from where the previous
+pass stopped. Each source's turn holds the source's own lease,
 so two copies of the worker never sync it at once.
 
 A turn lists the source's files: every file on its first turn, when asked (`full`) and
@@ -143,6 +145,9 @@ log = logging.getLogger("loom.knowledge.source_sync")
 WORKER = "knowledge_source_sync"
 # The share of the pass deadline after which no new source is started.
 _BUDGET_FRACTION = 0.75  # not a setting: the shape every cursor-resumed worker uses
+# The mirrored sources' share of a pass: every listing of theirs reads every file's list,
+# so they are bounded apart from the namespace sources.
+_MIRROR_SHARE = 1 / 3  # not a setting: the design's split of a pass
 # A source's lease outlives a stalled renewal by this much; it is renewed while held.
 _LEASE_TTL_S = 120.0  # not a setting: the entry-lease shape
 # Passes one file's failure that may pass (a 5xx, a timeout, its extractor call, its
@@ -232,6 +237,9 @@ class TurnResult:
     full: bool = False
     # A kind's own bookkeeping, written into the sync state as it is.
     kind_state: dict[str, Any] = field(default_factory=dict)
+    # A mirrored source's mirror, once its turn knows it: the state the turn derived
+    # from the mirror's documents is written there (`_write_state`).
+    mirror: str = ""
 
     def fail(self, status: str, error: str) -> None:
         """The turn ends `status` with `error`, as a pair: the first plain failure
@@ -320,6 +328,12 @@ def _budget() -> PassBudget:
     return PassBudget(started, started + seconds)
 
 
+def _leg(whole: PassBudget, share: float) -> PassBudget:
+    """`share` of the pass's seconds from now, never past the pass's own end."""
+    now = time.monotonic()
+    return PassBudget(now, min(now + (whole.stop_after - whole.started) * share, whole.stop_after))
+
+
 async def run_sync(
     *, org: str = "", namespace: str = "", only: str = "", full: bool = False
 ) -> PassResult:
@@ -346,13 +360,20 @@ async def run_sync(
         for src in usable:
             await source_ops.request_full_sync(src)
     states = await _states(usable)
+    mirrored = [s for s in usable if mirror_synced(s)]
+    if mirrored:
+        await _sync_mirrored(mirrored, states, run.budget, result)
+        # The namespace sources' share starts here whatever the mirrors used, so their
+        # progress says nothing about a mirror's size.
+        run.budget = _leg(run.budget, 1 - _MIRROR_SHARE)
+    usable = [s for s in usable if not mirror_synced(s)]
     asked = sorted(
         (s for s in usable if _requested(states, s)),
         key=lambda s: _requested(states, s),
     )
     rest = [s for s in usable if not _requested(states, s)]
     order = asked + rotate_to(rest, pass_context.resume_cursor(), key=_cursor_of)
-    result.sources = len(order)
+    result.sources = len(order) + len(mirrored)
     for i, src in enumerate(order):
         if run.spent():
             pass_context.set_cursor(_cursor_of(src))
@@ -369,9 +390,35 @@ async def run_sync(
             pass_context.set_cursor(_cursor_of(src))
             break
     await _extract_pending(order, run, result)
-    if not order and not result.retired:
+    if not order and not mirrored and not result.retired:
         pass_context.mark_idle()
     return result
+
+
+async def _sync_mirrored(
+    mirrored: list[KnowledgeSource],
+    states: dict[str, dict[str, str]],
+    whole: PassBudget,
+    result: PassResult,
+) -> None:
+    """The mirrored sources' turns, ahead of the namespace sources: at most a third of
+    the pass and their own document bound. Those asked to sync go first, then the one
+    synced longest ago, so every source gets its turn however many there are."""
+    run = Pass(
+        budget=_leg(whole, _MIRROR_SHARE),
+        left=int(settings.knowledge_source_mirror_documents_per_pass),
+    )
+
+    def order(src: KnowledgeSource) -> tuple[bool, str, str]:
+        detail = json_object(states.get(_cursor_of(src), {}).get("detail", ""))
+        asked = str(detail.get("requested_at") or "")
+        return (not asked, asked, str(detail.get("last_synced_at") or ""))
+
+    for src in sorted(mirrored, key=order):
+        if run.spent():
+            result.cut = True
+            return
+        await _sync_one(src, states.get(_cursor_of(src), {}), run, result)
 
 
 async def _usable(found: list[KnowledgeSource]) -> list[KnowledgeSource]:
@@ -1254,15 +1301,21 @@ async def retire(src: KnowledgeSource, uri: str) -> bool:
 async def _write_state(src: KnowledgeSource, read: dict[str, str], turn: TurnResult) -> None:
     """Record the turn in the source's sync state, under the namespace's sources
     lease like every other write of it. Nothing is written for a source removed or
-    replaced during the turn; a sync request made during it stays."""
+    replaced during the turn; a sync request made during it stays. A mirrored
+    source's namespace row keeps only its request, status and time: the rest is
+    derived from the mirror's documents, so it goes under the mirror (`mirror_state`)."""
     async with source_ops.sources_lease(src.org, src.namespace):
         with sequential_reads():
             fresh = await store.get_source(src.org, src.namespace, src.name)
             states = await store.read_states(src.org, src.namespace, [src.name])
+            mirror_row = await mirror_state(src, turn.mirror) if turn.mirror else {}
         if fresh is None or fresh.source_id != src.source_id:
             return
         current = states.get(src.name) or {}
         detail = json_object(current.get("detail", ""))
+        if mirror_synced(src):
+            await _write_mirrored_state(src, read, turn, current, mirror_row)
+            return
         asked = json_object(read.get("detail", "")).get("requested_at")
         now = _now_iso()
         detail.update(
@@ -1277,12 +1330,7 @@ async def _write_state(src: KnowledgeSource, read: dict[str, str], turn: TurnRes
             error=turn.error or turn.state_error,
         )
         detail.update(turn.kind_state)
-        if turn.waits_read:
-            detail["file_waits"] = turn.waits
-            if turn.waits_reset_for:
-                detail["waits_reset_for"] = turn.waits_reset_for
-            if turn.retry_granted_for is not None:
-                detail["retry_granted_for"] = turn.retry_granted_for
+        _record_waits(detail, turn)
         stamp = current.get("state_value", "")
         if turn.complete:
             # A change made after this listing is stamped later than anything it saw.
@@ -1293,6 +1341,62 @@ async def _write_state(src: KnowledgeSource, read: dict[str, str], turn: TurnRes
                 detail.pop("requested_at", None)
                 detail.pop("full", None)
         await store.write_state(src.org, src.namespace, src.name, state_value=stamp, detail=detail)
+
+
+def _record_waits(detail: dict[str, Any], turn: TurnResult) -> None:
+    if turn.waits_read:
+        detail["file_waits"] = turn.waits
+        if turn.waits_reset_for:
+            detail["waits_reset_for"] = turn.waits_reset_for
+        if turn.retry_granted_for is not None:
+            detail["retry_granted_for"] = turn.retry_granted_for
+
+
+async def mirror_state(src: KnowledgeSource, mirror: str) -> dict[str, str]:
+    """A mirrored source's own sync state: under its mirror and id, so a source added
+    again under the name starts afresh and the namespace's erasure takes it with the
+    mirror."""
+    return (await store.read_states(src.org, mirror, [src.source_id])).get(src.source_id) or {}
+
+
+async def _write_mirrored_state(
+    src: KnowledgeSource,
+    read: dict[str, str],
+    turn: TurnResult,
+    current: dict[str, str],
+    mirror_row: dict[str, str],
+) -> None:
+    """`_write_state` for a mirrored source: codes in the namespace row, the rest under
+    the mirror. A turn that failed before it knew its mirror writes the codes only."""
+    now = _now_iso()
+    stored = json_object(current.get("detail", ""))
+    shown: dict[str, Any] = {k: stored[k] for k in ("requested_at", "full") if k in stored}
+    asked = json_object(read.get("detail", "")).get("requested_at")
+    shown.update(last_synced_at=now, status=turn.status)
+    if turn.complete and shown.get("requested_at") == asked:
+        shown.pop("requested_at", None)
+        shown.pop("full", None)
+    if turn.mirror:
+        detail = json_object(mirror_row.get("detail", ""))
+        detail.update(
+            last_synced_at=now,
+            status=turn.status,
+            documents_seen=turn.documents_seen,
+            changed=turn.changed,
+            removed=turn.removed,
+            unconverted=turn.unconverted,
+            unconverted_reasons=turn.reasons,
+            skipped=turn.skipped,
+            error=turn.error or turn.state_error,
+        )
+        detail.update(turn.kind_state)
+        _record_waits(detail, turn)
+        if turn.complete and turn.full:
+            detail["full_listed_at"] = now
+        await store.write_state(src.org, turn.mirror, src.source_id, state_value="", detail=detail)
+    await store.write_state(
+        src.org, src.namespace, src.name, state_value=current.get("state_value", ""), detail=shown
+    )
 
 
 async def _retire_removed_sources(

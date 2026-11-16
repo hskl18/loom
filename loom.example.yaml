@@ -2825,6 +2825,11 @@ settings:
   # sources; the rest wait for the next pass. [live]
   # knowledge_source_sync_documents_per_pass: 40
 
+  # Documents one pass fetches, writes and retires for the mirrored sources, apart from
+  # the namespace sources' per-pass bound, so a mirror's size never takes their share.
+  # [live]
+  # knowledge_source_mirror_documents_per_pass: 40
+
   # Documents one source holds: its stored ones plus the new ones a turn writes. At it a
   # turn tries no new file, notes how many as `too_many_documents`, and still updates
   # and retires. At most 200,000: each read of the stored copies grows with its square.
