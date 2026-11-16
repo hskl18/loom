@@ -73,7 +73,7 @@ class LoomMemoryService(BaseMemoryService):
 
     Saved sessions and turns go to ``memory.set_from_messages``, ``add_memory`` to
     ``memory.set`` and ``search_memory`` to ``memory.search`` of the ADK user's
-    memories; a returned memory's ``id`` is the key ``delete_memory`` deletes. ADK
+    memories; a returned memory's ``id`` names it for ``delete_memory``. ADK
     awaits its memory service, so the service takes a ``loom.Agent``. The mapping of
     each method is in ``docs/features/integrations/frameworks.md`` (Google ADK).
     """
@@ -173,7 +173,7 @@ class LoomMemoryService(BaseMemoryService):
                 MemoryEntry(
                     # Only a memory has a key memory.delete takes. A conversation's passage
                     # names the fact extracted from it, yet deleting that fact keeps it.
-                    id=hit.memory_key if hit.source == "fact" else None,
+                    id=_entry_id(hit.memory_key, hit.session_id) if hit.source == "fact" else None,
                     content=types.Content(
                         role="user", parts=[types.Part(text=hit.content_excerpt)]
                     ),
@@ -189,8 +189,10 @@ class LoomMemoryService(BaseMemoryService):
         self, *, app_name: str, user_id: str, memory_id: str | None = None
     ) -> None:
         self._check_scope(app_name, user_id)
-        if memory_id:  # an entry with no id has nothing a key deletes, as in ADK's own service
-            await self._agent.memory.delete(memory_id, user_id=user_id)
+        if not memory_id:  # an entry with no id has nothing a key deletes, as in ADK's own
+            return
+        key, session = _parse_entry_id(memory_id)
+        await self._agent.memory.delete(key, user_id=user_id, session_id=session)
 
     def _check_scope(self, app_name: str, user_id: str) -> None:
         # Loom merges a write into a matching memory of the namespace whichever agent
@@ -224,6 +226,22 @@ class LoomMemoryService(BaseMemoryService):
                 session_id=session,
                 defer=self._defer,
             )
+
+
+def _entry_id(memory_key: str, session_id: str) -> str:
+    """A memory's entry id: its key and its session. Users share extracted keys, and a
+    delete by key alone finds the newest row of the key, which can be another user's."""
+    return json.dumps([memory_key, session_id or "-"])
+
+
+def _parse_entry_id(memory_id: str) -> tuple[str, str]:
+    try:
+        key, session = json.loads(memory_id)
+    except (ValueError, TypeError) as e:
+        raise ValueError(f"{memory_id!r} is not an id this service's search returned") from e
+    if not (isinstance(key, str) and isinstance(session, str)):
+        raise ValueError(f"{memory_id!r} is not an id this service's search returned")
+    return key, session
 
 
 def _loom_session(user_id: str, session_id: str) -> str:

@@ -108,7 +108,8 @@ async def test_add_memory_then_delete_by_id(agent) -> None:
     await eventually(lambda: ids("alice"), description="the memory found")
     (memory_id,) = await ids("alice")
     assert memory_id is not None
-    row = await agent.memory.get(memory_id, user_id="alice")
+    key, _session = json.loads(memory_id)
+    row = await agent.memory.get(key, user_id="alice")
     assert row is not None
     fields = ("value", "agent", "user_id", "session_id", "memory_type", "source_class", "tags")
     assert [row[f] for f in fields] == [
@@ -186,3 +187,24 @@ async def test_each_turn_saved_in_one_session_keeps_its_passage(agent) -> None:
 
     await eventually(lambda: passage("Zanzibar sardines harbour", "Zanzibar"), description="turn 1")
     assert await passage("garage door teal", "garage door")
+
+
+async def test_a_users_delete_reaches_their_fact_when_another_user_holds_its_key(agent) -> None:
+    """Extracted keys are concept names two users share; the entry id carries the
+    session, so Alice's delete reaches her row and leaves Bob's."""
+    service = LoomMemoryService(agent, app_name="travel", honour_abstain=False, defer=False)
+    for user in ("alice", "bob"):
+        await _turn(service, user, "I fly to Lisbon every month.")
+
+    async def facts(user: str) -> set[str | None]:
+        found = await service.search_memory(app_name="travel", user_id=user, query="Lisbon")
+        return {m.id for m in found.memories if m.custom_metadata["source"] == "fact"}
+
+    alices = await eventually(lambda: facts("alice"), description="alice's facts")
+    bobs = await eventually(lambda: facts("bob"), description="bob's facts")
+    shared = {json.loads(i)[0] for i in alices} & {json.loads(i)[0] for i in bobs}
+    assert shared, "the two users' extracted facts share a key"
+    for memory_id in alices:
+        await service.delete_memory(app_name="travel", user_id="alice", memory_id=memory_id)
+    assert not await facts("alice") & alices
+    assert await facts("bob") == bobs
