@@ -389,13 +389,13 @@ def test_an_entry_id_is_the_key_delete_memory_deletes() -> None:
     hits = [
         _hit("adk/1", "a fact"),
         _hit("chunk:adk/1:0", "a passage", source="chunk", parent_memory_key="adk/1"),
-        _hit("chunk:s1:0", "a turn", source="chunk"),
+        _hit("chunk:s1:0", "a turn", source="chunk", parent_memory_key="adk/1"),
         _hit("summary:s1", "a session", source="summary"),
     ]
     found = asyncio.run(
         _service(_FakeMemory(hits)).search_memory(app_name="travel", user_id="u", query="q")
     )
-    assert [m.id for m in found.memories] == ["adk/1", "adk/1", None, None]
+    assert [m.id for m in found.memories] == ["adk/1", None, None, None]
     sources = ["fact", "chunk", "chunk", "summary"]
     assert [m.custom_metadata["source"] for m in found.memories] == sources
 

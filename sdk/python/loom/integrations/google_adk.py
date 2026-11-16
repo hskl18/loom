@@ -167,9 +167,9 @@ class LoomMemoryService(BaseMemoryService):
         return SearchMemoryResponse(
             memories=[
                 MemoryEntry(
-                    # The key memory.delete takes: a memory's, or for a passage of a long
-                    # value the key it was written under; a conversation's chunks have none.
-                    id=hit.memory_key if hit.source == "fact" else (hit.parent_memory_key or None),
+                    # Only a memory has a key memory.delete takes. A conversation's passage
+                    # names the fact extracted from it, yet deleting that fact keeps it.
+                    id=hit.memory_key if hit.source == "fact" else None,
                     content=types.Content(
                         role="user", parts=[types.Part(text=hit.content_excerpt)]
                     ),
