@@ -217,7 +217,6 @@ class LoomMemoryService(BaseMemoryService):
                     }
                 )
         session = _loom_session(user_id, session_id)
-        # memory.set_from_messages takes at most _MAX_MESSAGES messages a call.
         for start in range(0, len(messages), _MAX_MESSAGES):
             await self._agent.memory.set_from_messages(
                 messages[start : start + _MAX_MESSAGES],
