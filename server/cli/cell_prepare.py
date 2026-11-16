@@ -1,7 +1,10 @@
 """`loom cell prepare`: register this cell in the router's directory and write the rows its
 processes read (docs/architecture/cells.md, "Preparing a cell" and "The tenancy check").
 
-It runs where the cell's stores are configured (`LOOM_CELL` set to the cell it names):
+It runs where the cell's stores are configured (`LOOM_CELL` set to the cell it names),
+holding the attach lock (`cell.ATTACH_LOCK_KEY`) on a direct session of the cell's Postgres,
+after that session's checks (one backend, the tenancy marker kept, a UTF8 database), so it
+never runs beside an attach or another prepare:
 
 1. It reads the cell's Postgres (deployment id, `first`, mode and own rows, tenancy rows)
    and the live processes' heartbeats, and refuses a cell whose rows name another cell
@@ -23,11 +26,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import hashlib
 import json
 import secrets
 import sys
 import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -45,6 +50,9 @@ _WAIT_S = 600  # not a setting: a flag's default
 # as a dead lease key past it), so a run never waits on a key the sweep took.
 _WAIT_MAX_S = 86400  # not a setting: a flag's bound
 
+
+# A bound on the lock session's statements: it reads the catalog and holds the lock.
+_LOCK_STATEMENT_MS = 60_000  # not a setting: a bound on one CLI session's reads
 
 _sleep = asyncio.sleep  # the seam the retry tests replace
 
@@ -442,6 +450,38 @@ async def prepare(
     args: argparse.Namespace,
     router: httpx.URL,
     transport: httpx.AsyncBaseTransport | None = None,
+) -> int:
+    """Prepare the cell, holding the attach lock for the run (`attach_lock`)."""
+    async with attach_lock():
+        return await _prepare_locked(ch, args, router, transport)
+
+
+@contextlib.asynccontextmanager
+async def attach_lock() -> AsyncIterator[None]:
+    """The attach lock, held on a direct session of the cell's Postgres while the block
+    runs, after that session's checks: prepare and attach write the same probe nonce, and
+    one of them runs at a time."""
+    from server.cli import cell_attach_pg
+    from server.cli.cell_ch import Refused as Stopped
+    from server.core import pg
+
+    async with pg.dedicated(statement_timeout_ms=_LOCK_STATEMENT_MS) as conn:
+        try:
+            refusals = await cell_attach_pg.direct_refusals(conn, "prepare")
+            refusals += await cell_attach_pg.encoding_refusals(conn)
+            if refusals:
+                raise Stopped(refusals)
+            await cell_attach_pg.take_lock(conn, "prepare")
+        except Stopped as e:
+            raise Refused(str(e)) from None
+        yield
+
+
+async def _prepare_locked(
+    ch: Any,
+    args: argparse.Namespace,
+    router: httpx.URL,
+    transport: httpx.AsyncBaseTransport | None,
 ) -> int:
     rows = await _read_rows()
     if not rows.deployment_id:

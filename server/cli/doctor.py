@@ -566,10 +566,15 @@ def _problem_checks(problems: list[Any]) -> list[tuple[str, str, str]]:
     return [(f"problem:{p.code}", grade(p), f"{p.message} Fix: {p.fix}") for p in problems]
 
 
-def _run_doctor_checks() -> list[tuple[str, str, str]]:
+def _run_doctor_checks(allowed_roles: tuple[str, ...] = ()) -> list[tuple[str, str, str]]:
     """The live checks (Python, settings, JWT, ClickHouse, LLM) followed
-    by the shared problem list, as (name, grade, detail)."""
-    return _run_live_checks() + _code_mirror_checks() + _problem_checks(_doctor_problems())
+    by the shared problem list, as (name, grade, detail). `allowed_roles` is
+    `--pg-allow-role`, for a cell's checks."""
+    return (
+        _run_live_checks(allowed_roles)
+        + _code_mirror_checks()
+        + _problem_checks(_doctor_problems())
+    )
 
 
 def _code_mirror_checks() -> list[tuple[str, str, str]]:
@@ -582,7 +587,7 @@ def _code_mirror_checks() -> list[tuple[str, str, str]]:
         return [("code_mirrors", WARN, f"not checked: {type(e).__name__}: {e}")]
 
 
-def _run_live_checks() -> list[tuple[str, str, str]]:
+def _run_live_checks(allowed_roles: tuple[str, ...] = ()) -> list[tuple[str, str, str]]:
     """Run the doctor's live checks and return them as (name, grade, detail)
     with grade one of PASS / WARN / FAIL.
 
@@ -664,7 +669,7 @@ def _run_live_checks() -> list[tuple[str, str, str]]:
     if settings_ok and ch_ok and settings.cell:
         from server.cli import doctor_cell
 
-        checks += doctor_cell.cell_checks()
+        checks += doctor_cell.cell_checks(allowed_roles)
 
     # 5. LLM provider resolution: what extraction runs on and
     # what decided it; WARN when the provider was inferred (or named) but its
@@ -675,6 +680,17 @@ def _run_live_checks() -> list[tuple[str, str, str]]:
         checks.append(("llm_provider", PASS, "skipped (settings did not load)"))
 
     return checks
+
+
+def _stray_org_checks(budget_s: float) -> list[tuple[str, str, str]]:
+    """`--stray-orgs`, on a cell only (LOOM_CELL set)."""
+    from server.settings import settings
+
+    if not settings.cell:
+        return [("cell_stray_orgs", WARN, "not read: LOOM_CELL is unset (no cell)")]
+    from server.cli import doctor_cell
+
+    return doctor_cell.stray_org_checks(budget_s)
 
 
 def _client_checks(args: argparse.Namespace) -> list[tuple[str, str, str]]:
@@ -722,7 +738,9 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
     operator sees the full picture. Exit 0 = nothing failed (warnings are
     listed but do not fail); 1 = at least one FAIL.
     """
-    checks = _run_doctor_checks()
+    checks = _run_doctor_checks(tuple(getattr(_args, "pg_allow_role", None) or ()))
+    if getattr(_args, "stray_orgs", False):
+        checks += _stray_org_checks(_args.stray_orgs_budget)
     # The client's side of the same picture, when asked.
     client = _client_checks(_args) if getattr(_args, "client", False) else []
     checks = _client_machine_grades(checks, client) + client
@@ -841,4 +859,21 @@ def _add_doctor_flags(p_doc: argparse.ArgumentParser) -> None:
         ),
     )
     p_doc.add_argument("--server-url", default=None, help="Override the client's server URL.")
+    p_doc.add_argument(
+        "--pg-allow-role",
+        action="append",
+        default=[],
+        help="On a cell: a Postgres role that may make an org held (the servers' role).",
+    )
+    p_doc.add_argument(
+        "--stray-orgs",
+        action="store_true",
+        help="On a cell: also read the orgs its stores hold without a tenancy row.",
+    )
+    p_doc.add_argument(
+        "--stray-orgs-budget",
+        type=float,
+        default=60.0,
+        help="Seconds --stray-orgs may read for, smallest tables first (default 60).",
+    )
     p_doc.add_argument("--token", default=None, help="Override the client's token.")

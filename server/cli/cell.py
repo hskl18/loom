@@ -1,7 +1,7 @@
 """`loom cell credential | limit | which | remove`: the operator's commands that touch the
 router's directory (docs/architecture/cells.md, "Operations"). Only `remove` reads a cell's
 stores, a first cell's Postgres; the others run while a cell is down. `loom cell prepare` is
-`server/cli/cell_prepare.py`.
+`server/cli/cell_prepare.py`, `loom cell attach` `server/cli/cell_attach.py`.
 
 - `credential new` makes a router credential offline and prints it with its SHA-256;
   `credential --cell <cell> --next <sha256> | --finish | --revert` rotates a cell's.
@@ -459,6 +459,8 @@ def _add_cell_parser(sub: Any) -> None:
     remove.add_argument("--router", help="The router's URL (default: LOOM_CELL_ROUTER_URL)")
     remove.set_defaults(func=_cmd_remove)
 
+    from server.cli.cell_attach import add_attach_parser
     from server.cli.cell_prepare import add_prepare_parser
 
     add_prepare_parser(csub)
+    add_attach_parser(csub)

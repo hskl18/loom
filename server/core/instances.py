@@ -53,6 +53,10 @@ QUERY_TAG = "instances.heartbeat"
 _LIVE_INTERVALS = 3
 # How often the leader drops the KeeperMap keys of processes gone an hour.
 _PRUNE_EVERY_S = 600.0
+# How old a row's last beat is before the leader drops its key. A contract across builds,
+# not a tunable: attach reads stopped rows back that far (`read_recent`) while the leader
+# that sweeps them may run another build, so a change is a design change of its own.
+PRUNE_AFTER_S = 3600
 
 # (pid, instance id, start time) of this process.
 _process: tuple[int, str, datetime] | None = None
@@ -130,6 +134,22 @@ def live_window_s() -> float:
     return _LIVE_INTERVALS * float(settings.instance_heartbeat_seconds)
 
 
+def widened_window_s() -> float:
+    """The live window plus what a stopping process still does after its stop beat: it
+    drains its ClickHouse writes, then settles cut-off ones. A process whose last beat,
+    stopped or not, is younger than this may still write."""
+    from server.boot import SHUTDOWN_DRAIN_BUDGET_S
+    from server.insights.app.provider_barrier import SHUTDOWN_RETIRE_S
+
+    return live_window_s() + SHUTDOWN_DRAIN_BUDGET_S + SHUTDOWN_RETIRE_S
+
+
+def boot_allowance_s() -> float:
+    """How long a booting process takes to report its first cell row and its first router
+    answer: two beats and one router read."""
+    return 2 * float(settings.instance_heartbeat_seconds) + float(settings.cell_router_timeout_s)
+
+
 async def beat(ch: Any, *, stopped: bool = False) -> None:
     """Write this process's row. A KeeperMap insert replaces the key."""
     await ch.insert(TABLE, [row(stopped=stopped)])
@@ -197,6 +217,34 @@ async def read_live(ch: Any, *, all_deployments: bool = False) -> list[dict[str,
     return out
 
 
+async def read_recent(ch: Any, *, since: str | None = None) -> list[dict[str, Any]]:
+    """Every process of every deployment sharing this ClickHouse whose widened window
+    (`widened_window_s`) reaches past `since` (a ClickHouse `DateTime64(3)` as text), or
+    past now without one: stopped rows included, which `read_live` drops. `stopped` is its
+    newest row's flag and `live` whether that row is inside the live window and not
+    stopped, both judged in ClickHouse."""
+    rows = await ch.query_all(
+        f"""
+        SELECT instance_id,
+               argMax(keys_fp, heartbeat_at) AS keys_fp,
+               argMax(stopped, heartbeat_at) AS stopped,
+               toString(max(heartbeat_at)) AS last_beat,
+               max(heartbeat_at) > now64(3) - toIntervalMillisecond({{live:UInt32}})
+                   AND stopped = 0 AS live
+        FROM {TABLE}
+        GROUP BY instance_id
+        HAVING max(heartbeat_at) + toIntervalMillisecond({{wide:UInt32}})
+               > if({{since:String}} = '', now64(3), toDateTime64({{since:String}}, 3))
+        """,
+        params={
+            "live": int(live_window_s() * 1000),
+            "wide": int(widened_window_s() * 1000),
+            "since": since or "",
+        },
+    )
+    return [dict(r) for r in rows]
+
+
 def live_rows() -> list[dict[str, Any]]:
     """The live rows as of the last read; none before the first read or once
     that read is older than the live window (ClickHouse unreachable)."""
@@ -224,14 +272,15 @@ async def _prune(ch: Any) -> None:
     # Each table's sweep stands alone: one failing leaves the other to run.
     try:
         await ch.execute(
-            "ALTER TABLE loom.instances DELETE WHERE heartbeat_at < now64(3) - toIntervalHour(1)"
+            "ALTER TABLE loom.instances DELETE "
+            f"WHERE heartbeat_at < now64(3) - toIntervalSecond({PRUNE_AFTER_S})"
         )
     except Exception as e:  # noqa: BLE001 — a later sweep retries
         log.warning("instance row sweep failed: %s", e)
     try:
         await ch.execute(
             "ALTER TABLE loom.cell_heartbeats DELETE "
-            "WHERE heartbeat_at < now64(3) - toIntervalHour(1)"
+            f"WHERE heartbeat_at < now64(3) - toIntervalSecond({PRUNE_AFTER_S})"
         )
     except Exception as e:  # noqa: BLE001 — a later sweep retries
         log.warning("cell heartbeat sweep failed: %s", e)
@@ -331,8 +380,10 @@ def _reset_for_tests() -> None:
 
 __all__ = [
     "CELL_TABLE",
+    "PRUNE_AFTER_S",
     "TABLE",
     "beat",
+    "boot_allowance_s",
     "cell_beat",
     "cell_row",
     "instance_id",
@@ -341,8 +392,10 @@ __all__ = [
     "live_window_s",
     "publish_config",
     "read_live",
+    "read_recent",
     "schema_version",
     "start",
     "stop",
     "tick",
+    "widened_window_s",
 ]
