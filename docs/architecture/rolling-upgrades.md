@@ -807,10 +807,10 @@ schema. These rules keep that safe. The operator procedure is in
     alone, so after a metadata edit it fetches and writes the file again, as it does
     today. `tests/unit/test_knowledge_source_sync_mirror.py` and
     `tests/unit/test_knowledge_source_revisions_sql.py` check N's side.
-55. **The mirrored sources' share of a pass**: N runs the mirrored sources first, in at
-    most a third of the pass and under their own document bound
-    (`LOOM_KNOWLEDGE_SOURCE_MIRROR_DOCUMENTS_PER_PASS`), those asked to sync first and
-    then the one synced longest ago; the namespace sources then have the rest of the
+55. **The mirrored sources' share of a pass**: N runs the mirrored sources first, until
+    a third of the pass has passed and under their own document bound
+    (`LOOM_KNOWLEDGE_SOURCE_MIRROR_DOCUMENTS_PER_PASS`), the one synced longest ago
+    first, a sync request included; the namespace sources then have the rest of the
     pass, two thirds or more, under their own bound. A mirrored source's turn keeps its
     own state under its mirror and source id, leaves only its request, status and time
     in the namespace row, spends as the mirror, and reads the lists on from a cursor in

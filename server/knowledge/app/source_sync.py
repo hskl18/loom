@@ -9,10 +9,10 @@ bookkeeping goes in `TurnResult.kind_state`, which the sync state keeps.
 
 A pass reads the active sources and drops those whose namespace is inactive. The
 mirrored sources go first, in at most a third of the pass and under their own document
-bound (`_sync_mirrored`); the namespace sources then have the rest of the pass. Sources
-a namespace's admin asked to sync (`sync_now`) go first, the rest from where the
-previous pass stopped. Each source's turn holds the source's own lease, so two copies of
-the worker never sync it at once.
+bound (`_sync_mirrored`); the namespace sources then have the rest of the pass. Among
+the namespace sources, those a namespace's admin asked to sync (`sync_now`) go first,
+the rest from where the previous pass stopped. Each source's turn holds the source's own
+lease, so two copies of the worker never sync it at once.
 
 A turn lists the source's files: every file on its first turn, when asked (`full`) and
 once `knowledge_source_sync_full_interval_seconds` have passed since the last full
@@ -329,9 +329,10 @@ def _budget() -> PassBudget:
 
 
 def _leg(whole: PassBudget, share: float) -> PassBudget:
-    """`share` of the pass's seconds from now, never past the pass's own end."""
-    now = time.monotonic()
-    return PassBudget(now, min(now + (whole.stop_after - whole.started) * share, whole.stop_after))
+    """From now until `share` of the pass's seconds after the pass's start: what ran
+    before (an admin's delete requests) comes out of it, never out of the rest."""
+    end = whole.started + (whole.stop_after - whole.started) * share
+    return PassBudget(time.monotonic(), min(end, whole.stop_after))
 
 
 async def run_sync(
@@ -362,8 +363,8 @@ async def run_sync(
     states = await _states(usable)
     mirrored = [s for s in usable if mirror_synced(s)]
     if mirrored:
-        # At most a third of the pass, so the namespace sources keep two thirds or more
-        # of the pass's own budget, and their document bound is their own.
+        # Until a third of the pass, so the namespace sources keep two thirds or more of
+        # the pass's own budget, and their document bound is their own.
         await _sync_mirrored(mirrored, states, run.budget, result)
     usable = [s for s in usable if not mirror_synced(s)]
     asked = sorted(

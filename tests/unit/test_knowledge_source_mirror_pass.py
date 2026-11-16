@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from datetime import datetime
 from typing import Any
 
@@ -47,12 +48,14 @@ def test_the_mirrored_sources_run_first_under_their_own_document_bound(
     assert result.sources == 2 and result.cut
 
 
-def test_a_leg_takes_its_share_of_the_pass_and_never_ends_past_it() -> None:
-    whole = PassBudget(started=0.0, stop_after=1e12)
+def test_a_leg_ends_at_its_share_of_the_pass_from_the_pass_s_start() -> None:
+    now = time.monotonic()
+    whole = PassBudget(started=now - 300, stop_after=now + 150)  # 300 s already spent
     leg = source_sync._leg(whole, 1 / 3)
-    assert leg.stop_after - leg.started == pytest.approx(1e12 / 3, rel=1e-6)
-    ending = PassBudget(started=0.0, stop_after=leg.started + 1)
-    assert source_sync._leg(ending, 1 / 3).stop_after == ending.stop_after
+    # The leg's share ends 150 s into the pass: what ran before it came out of it.
+    assert leg.stop_after == pytest.approx(now - 150) and leg.exhausted() is True
+    ending = PassBudget(started=now, stop_after=now + 1)
+    assert source_sync._leg(ending, 2).stop_after == ending.stop_after
 
 
 def test_the_mirrored_source_synced_longest_ago_goes_first_even_past_a_request(
@@ -250,3 +253,32 @@ def test_a_publication_owed_at_the_read_moves_no_cursor(
     monkeypatch.setattr(source_sync.documents, "publications_owed", _owed)
     _turn_with(world, slow_lists, 2)  # stops before the wrap: it would begin a cycle
     assert _own(world).get("lists_cursor", "") == ""
+
+
+def test_a_publication_parked_by_the_end_keeps_the_cycle(
+    world: Any, mirror: Any, slow_lists: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _turn_with(world, slow_lists, 0)
+    _turn_with(world, slow_lists, 2)
+    kept = (_own(world)["lists_cursor"], _own(world)["lists_since"])
+    answers = iter(["", "parked"])  # clear when the copies are read, parked by the end
+
+    async def _owed(org: str, namespace: str, uri_suffix: str) -> str:
+        return next(answers)
+
+    monkeypatch.setattr(source_sync.documents, "publications_owed", _owed)
+    rows = len(slow_lists["rows"])
+    _turn_with(world, slow_lists, 1)  # doc3 read, doc4 left: it would move the cursor on
+    assert len(slow_lists["rows"]) == rows
+    assert (_own(world)["lists_cursor"], _own(world)["lists_since"]) == kept
+
+
+def test_a_turn_that_reads_every_list_mid_cycle_lands_its_own_start_and_ends_the_cycle(
+    world: Any, mirror: Any, slow_lists: dict[str, Any]
+) -> None:
+    _turn_with(world, slow_lists, 0)
+    _turn_with(world, slow_lists, 2)
+    began = datetime.fromisoformat(_own(world)["lists_since"])
+    _turn_with(world, slow_lists, 0)  # time for every list
+    assert slow_lists["rows"][-1] > began
+    assert (_own(world)["lists_cursor"], _own(world)["lists_since"]) == ("", "")

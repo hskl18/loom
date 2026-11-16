@@ -720,14 +720,14 @@ A pass runs the listings first, rotating across the mirrored sources, and gives 
 most a third of the pass deadline (`knowledge_source_sync_max_pass_seconds`) and their
 own document bound, while the namespace sources then have the rest of the pass, two
 thirds or more, under theirs, so the documents they write say nothing about a mirror's
-size (when they start does, which is timing and out of scope, as the threat model says);
-a listing that does not finish goes on from its cursor in the next pass, and until it
-completes the source's listing row keeps its older start, so a large source needs a
-stale bound longer than the time to list it all. `inspect` and `loom doctor` report each
-source's oldest listing start, a mirrored source's to a platform admin only (its
-connected owner sees fresh or stale). A stopped sync hides every mirrored document once
-the stale bound passes. The implementing pull request measures the writes of a crawl
-over 2000 people and puts the figures here.
+size (when they start does, which the threat model leaves out of scope); a listing that
+does not finish goes on from its cursor in the next pass, and until it completes the
+source's listing row keeps its older start, so a large source needs a stale bound longer
+than the time to list it all. `inspect` and `loom doctor` report each source's oldest
+listing start, a mirrored source's to a platform admin only (its connected owner sees
+fresh or stale). A stopped sync hides every mirrored document once the stale bound
+passes. The implementing pull request measures the writes of a crawl over 2000 people
+and puts the figures here.
 
 How lists from several accounts of one source, a person a crawl stops reading, a stopped
 source's rows, and restores of either store are handled is the implementing pull
@@ -756,10 +756,11 @@ admits someone the store no longer names.
 | A caller injects store query syntax through a filter                              | Filters are fields with patterns, escaped and built by the server; no raw query is taken.                                                                                                                                                                                                                                                                                                                                                                                                                                               | `server/clients/gdrive.py`                                                             |
 | A stolen connected credential changes the store                                   | Only read scopes are accepted; the credential is sealed and never returned.                                                                                                                                                                                                                                                                                                                                                                                                                                                             | the connect callback; `server/core/secrets_at_rest.py`                                 |
 
-Out of scope: response timing, and a resource limit (memory, rows read) that a mirror's
-size can trip on a per-request statement, which like timing depends on how much the
-mirror holds; how fast the shared pass gets to a connected owner's own source, which its
-fresh or stale code and per-item status reflect; that a namespace erasure is still
+Out of scope: response timing, and when a pass reaches the namespace sources, which the
+mirrored sources' turns before them delay; a resource limit (memory, rows read) that a
+mirror's size can trip on a per-request statement, which like timing depends on how much
+the mirror holds; how fast the shared pass gets to a connected owner's own source, which
+its fresh or stale code and per-item status reflect; that a namespace erasure is still
 retrying, which a namespace admin sees whatever its cause; a worker an orchestrating
 agent starts outside a flagged session's process tree; a person who hands their own
 `reads_as_creator` token to a team bot or a CI job, which then reads as them; a session
