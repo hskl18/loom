@@ -229,11 +229,13 @@ def _loom_session(user_id: str, session_id: str) -> str:
 
 
 def _iso_time(text: str | None) -> datetime | None:
-    """An ISO 8601 timestamp; ADK allows any text, which is not a ``valid_at``."""
+    """An ISO 8601 timestamp; ADK allows any text, which is not a ``valid_at``. One
+    without a zone is local time, as ADK formats its own entries' timestamps."""
     try:
-        return datetime.fromisoformat(text) if text else None
+        moment = datetime.fromisoformat(text) if text else None
     except ValueError:
         return None
+    return moment.astimezone() if moment and moment.tzinfo is None else moment
 
 
 def _text(content: types.Content | None) -> str:

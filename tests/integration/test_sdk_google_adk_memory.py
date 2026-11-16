@@ -151,3 +151,38 @@ async def test_two_users_saving_the_same_text_each_find_their_own(agent) -> None
     carol = await ids("carol")
     dave = await eventually(lambda: ids("dave"), description="dave's memory")
     assert len(carol) == len(dave) == 1 and carol != dave
+
+
+async def test_each_turn_saved_in_one_session_keeps_its_passage(agent) -> None:
+    """The documented callback saves each turn on its own under one session; a search
+    for words only the first turn said still finds that turn's verbatim passage."""
+    service = LoomMemoryService(agent, app_name="travel", honour_abstain=False, defer=False)
+    llm = _EchoLlm()
+    sessions = InMemorySessionService()
+    runner = Runner(
+        app_name="travel",
+        agent=LlmAgent(name="assistant", model=llm, after_agent_callback=_save_turn),
+        session_service=sessions,
+        memory_service=service,
+    )
+    session = await sessions.create_session(app_name="travel", user_id="alice")
+    for text in (
+        "My cat Zanzibar loves sardines from the harbour market.",
+        "Tomorrow I am repainting the garage door bright teal.",
+    ):
+        message = types.Content(role="user", parts=[types.Part(text=text)])
+        async for _ in runner.run_async(
+            user_id="alice", session_id=session.id, new_message=message
+        ):
+            pass
+
+    async def passage(query: str, words: str) -> bool:
+        found = await service.search_memory(app_name="travel", user_id="alice", query=query)
+        return any(
+            m.custom_metadata["source"] == "chunk" and words in (m.content.parts[0].text or "")
+            for m in found.memories
+            if m.content and m.content.parts
+        )
+
+    await eventually(lambda: passage("Zanzibar sardines harbour", "Zanzibar"), description="turn 1")
+    assert await passage("garage door teal", "garage door")

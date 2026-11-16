@@ -8,6 +8,7 @@ import asyncio
 import importlib
 import sys
 from collections.abc import AsyncGenerator
+from datetime import datetime
 from typing import Any
 
 import pytest
@@ -344,6 +345,15 @@ def test_add_memory_writes_content_keyed_memories() -> None:
     assert bob.calls[0][1][0] != first[1][0]
     assert first[2]["valid_at"].isoformat() == "2026-11-01T09:00:00+00:00"
     assert again[2]["valid_at"] is None
+
+
+def test_a_timestamp_without_a_zone_is_local_time() -> None:
+    fake = _FakeMemory()
+    entry = MemoryEntry(content=_user("Alice moved to Porto"), timestamp="2026-11-01T09:00:00")
+    asyncio.run(_service(fake).add_memory(app_name="travel", user_id="alice", memories=[entry]))
+    ((_, _, kw),) = fake.calls
+    assert kw["valid_at"] == datetime(2026, 11, 1, 9).astimezone()
+    assert kw["valid_at"].tzinfo is not None
 
 
 def test_a_timestamp_that_is_not_iso_is_no_valid_at() -> None:
