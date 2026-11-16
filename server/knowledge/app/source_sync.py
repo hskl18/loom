@@ -1306,10 +1306,10 @@ async def _write_state(src: KnowledgeSource, read: dict[str, str], turn: TurnRes
         if fresh is None or fresh.source_id != src.source_id:
             return
         current = states.get(src.name) or {}
-        detail = json_object(current.get("detail", ""))
         if mirror_synced(src):
-            await _write_mirrored_state(src, read, turn, current, detail, mirror_row)
+            await _write_mirrored_state(src, read, turn, current, mirror_row)
             return
+        detail = json_object(current.get("detail", ""))
         asked = json_object(read.get("detail", "")).get("requested_at")
         now = _now_iso()
         _record_turn(detail, turn, now)
@@ -1359,7 +1359,6 @@ async def _write_mirrored_state(
     read: dict[str, str],
     turn: TurnResult,
     current: dict[str, str],
-    stored: dict[str, Any],
     mirror_row: dict[str, str],
 ) -> None:
     """`_write_state` for a mirrored source: codes in the namespace row, the rest under
@@ -1367,6 +1366,7 @@ async def _write_mirrored_state(
     result is then a fresh one), writes the codes only: the mirror row keeps what the
     last turn that returned recorded."""
     now = _now_iso()
+    stored = json_object(current.get("detail", ""))
     shown: dict[str, Any] = {k: stored[k] for k in ("requested_at", "full") if k in stored}
     asked = json_object(read.get("detail", "")).get("requested_at")
     shown.update(last_synced_at=now, status=turn.status)

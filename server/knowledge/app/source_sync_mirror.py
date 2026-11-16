@@ -137,8 +137,7 @@ async def _in_mirror(
     except _Refused:
         return  # the store refused the account: nothing more is read or written
     lists_good = all_written and whole
-    # A head owed at the read was not among the copies, so its list was never read.
-    vouched = cycle.advance(started, stopped_at, result) if lists_good and not owed else None
+    vouched = cycle.advance(started, stopped_at, result) if lists_good else None
     stored = sync.index_with_room(result, [c for c in copies if c["searchable"]])
     try:
         for f in files:
@@ -159,7 +158,8 @@ async def _in_mirror(
         await sync.retire_absent(src, by_id, gone, run, result)
     if not lists_good:
         return
-    # Parked at the end outranks owed at the read; either holds the row back.
+    # Parked at the end outranks owed at the read (that head was not among the copies);
+    # either holds the row and the cycle back.
     held_back = await documents.publications_owed(src.org, src.mirror, suffix) or owed
     if held_back:
         cycle.keep(result)  # the lists read count for nothing: the cycle stays as it was

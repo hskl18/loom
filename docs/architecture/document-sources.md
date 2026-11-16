@@ -710,12 +710,12 @@ A stored document the complete listing no longer has is rewritten `unread`, with
 entry cleared, then retired on positive evidence, as today. The listing row's start
 lands only once every changed list and every such `unread` rewrite of that listing is
 written, so a row is never newer than the lists it vouches for. These rewrites are
-outside the pass's document cap, bounded only by half of what is left of the listings'
-share when a turn starts them, so its new and changed files still get time. Content is
-fetched only for a file whose revision changed, and a content write carries the list of
-the latest listing that read the file, so a fetch the pass bound deferred never writes
-an older list; a listing row lands only once every document written during that listing
-carries a list it read.
+outside the pass's document cap; the permission reads they need stop at half of what is
+left of the listings' share when a turn starts them, so the turn's new and changed files
+still get time. Content is fetched only for a file whose revision changed, and a content
+write carries the list of the latest listing that read the file, so a fetch the pass
+bound deferred never writes an older list; a listing row lands only once every document
+written during that listing carries a list it read.
 
 A pass runs the listings first, rotating across the mirrored sources, and gives them at
 most a third of the time the pass starts work in (a quarter of

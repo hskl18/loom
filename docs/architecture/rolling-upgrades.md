@@ -806,9 +806,9 @@ schema. These rules keep that safe. The operator procedure is in
     such a rewrite stays until the file changes; N-1 checks the version alone, so after
     a metadata edit it fetches and writes the file again, as it does today.
     `tests/unit/test_knowledge_source_sync_mirror.py` and
-    `tests/unit/test_knowledge_source_revisions_sql.py` check N's side. 55. **The
-    mirrored sources' share of a pass**: N runs the mirrored sources first, until a
-    third of the time the pass starts work in has passed (a quarter of
+    `tests/unit/test_knowledge_source_revisions_sql.py` check N's side.
+55. **The mirrored sources' share of a pass**: N runs the mirrored sources first, until
+    a third of the time the pass starts work in has passed (a quarter of
     `knowledge_source_sync_max_pass_seconds` at the default fraction) and under their
     own document bound (`LOOM_KNOWLEDGE_SOURCE_MIRROR_DOCUMENTS_PER_PASS`), the one
     synced longest ago first, a sync request included; the namespace sources then have
