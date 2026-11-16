@@ -120,3 +120,25 @@ async def test_add_memory_then_delete_by_id(agent) -> None:
     assert await ids("alice") == [memory_id]  # another user's delete reaches nothing
     await service.delete_memory(app_name="travel", user_id="alice", memory_id=memory_id)
     assert await ids("alice") == []
+
+
+async def test_two_users_saving_the_same_text_each_find_their_own(agent) -> None:
+    service = LoomMemoryService(agent, app_name="travel", honour_abstain=False)
+    entry = MemoryEntry(content=types.Content(parts=[types.Part(text="Prefers window seats")]))
+
+    async def ids(user: str) -> list[str | None]:
+        found = await service.search_memory(app_name="travel", user_id=user, query="window seat")
+        return [m.id for m in found.memories]
+
+    await service.add_memory(app_name="travel", user_id="carol", memories=[entry])
+
+    async def carols_vector() -> list[str]:
+        hits = await agent.memory.search("window seats", memory_type="semantic", top_k=5)
+        return [h.memory_key for h in hits]
+
+    # Loom's write-time check reads vectors: dave saves once carol's is searchable.
+    await eventually(carols_vector, description="carol's vector")
+    await service.add_memory(app_name="travel", user_id="dave", memories=[entry])
+    carol = await ids("carol")
+    dave = await eventually(lambda: ids("dave"), description="dave's memory")
+    assert len(carol) == len(dave) == 1 and carol != dave

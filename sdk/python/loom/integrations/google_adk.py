@@ -71,10 +71,10 @@ class LoomMemoryService(BaseMemoryService):
     resolves duplicates and conflicts; a session added again is extracted
     again, so a callback that runs every turn should add only that turn's
     events; ``add_events_to_memory`` needs the ``session_id``, which ADK's
-    callback context passes. Events a rewind took back are left out; a turn saved before a
-    later rewind keeps its memories, which the app deletes by the ids a search
-    returns. ``add_memory`` writes each entry with ``memory.set`` under a key
-    derived from the user and the text
+    callback context passes. Events a rewind took back are left out; a turn
+    saved before a later rewind keeps its memories, which the app deletes by
+    the ids a search returns. ``add_memory`` writes each entry with
+    ``memory.set`` under a key derived from the user and the text
     (``<key_prefix>/<first 20 hex of sha256>``), its ``timestamp`` as the
     memory's ``valid_at`` when it is ISO 8601. ``search_memory`` runs
     ``memory.search`` of the user's memories; with ``honour_abstain`` it leaves
@@ -209,7 +209,7 @@ class LoomMemoryService(BaseMemoryService):
                 f"{app_name!r}: give each app its own Loom namespace and service"
             )
 
-    async def _extract(self, user_id: str, session_id: str | None, events: Sequence[Event]) -> None:
+    async def _extract(self, user_id: str, session_id: str, events: Sequence[Event]) -> None:
         messages: list[dict[str, object]] = []
         for event in events:
             text = _text(event.content)
@@ -222,7 +222,6 @@ class LoomMemoryService(BaseMemoryService):
                     }
                 )
         if messages:
-            # The session keys Loom's evidence of the turns (chunks, summary).
             await self._agent.memory.set_from_messages(
                 messages, user_id=user_id, session_id=session_id, defer=self._defer
             )

@@ -5,6 +5,8 @@ preload_memory and load_memory."""
 from __future__ import annotations
 
 import asyncio
+import importlib
+import sys
 from collections.abc import AsyncGenerator
 from typing import Any
 
@@ -19,7 +21,7 @@ from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.adk.tools import load_memory, preload_memory
 from google.genai import types
-from loom import SyncAgent
+from loom import Agent, SyncAgent
 from loom.integrations.google_adk import LoomMemoryService
 from loom.memory import MemorySearchHit, MemorySearchResult
 from pydantic import Field
@@ -118,9 +120,7 @@ def test_it_is_an_adk_memory_service() -> None:
 
 def test_it_refuses_a_sync_agent_a_top_k_out_of_bounds_and_an_empty_prefix() -> None:
     with pytest.raises(TypeError, match="ADK awaits"):
-        LoomMemoryService(
-            SyncAgent(org="o", namespace="n", base_url="http://127.0.0.1:9"), app_name="travel"
-        )
+        LoomMemoryService(object.__new__(SyncAgent), app_name="travel")
     for top_k in (0, 501):
         with pytest.raises(ValueError, match="top_k"):
             _service(_FakeMemory(), top_k=top_k)
@@ -395,3 +395,47 @@ def test_an_entry_id_is_the_key_delete_memory_deletes() -> None:
     )
     assert [m.id for m in found.memories] == ["adk/1", None, None]
     assert [m.custom_metadata["source"] for m in found.memories] == ["fact", "chunk", "summary"]
+
+
+def test_without_google_adk_the_import_names_the_extra(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "google.adk.events", None)
+    monkeypatch.delitem(sys.modules, "loom.integrations.google_adk")
+    with pytest.raises(ImportError, match=r"clickhouse-loom\[google-adk\]"):
+        importlib.import_module("loom.integrations.google_adk")
+
+
+def test_a_real_agent_posts_the_service_calls() -> None:
+    posts: list[tuple[str, dict[str, Any]]] = []
+
+    async def post(path: str, payload: dict[str, Any], *a: Any, **kw: Any) -> dict[str, Any]:
+        posts.append((path, dict(payload)))
+        return {"results": []}
+
+    from google.adk.events import Event
+
+    agent = Agent(org="acme", namespace="travel", agent="bot", base_url="http://x", api_key="k")
+    agent.transport.post = post  # type: ignore[method-assign]
+    service = LoomMemoryService(agent, app_name="travel", top_k=3)
+    event = Event(author="user", content=_user("I prefer aisle seats"))
+    entry = MemoryEntry(content=_user("Alice prefers aisle seats"))
+
+    async def calls() -> None:
+        await service.search_memory(app_name="travel", user_id="alice", query="seat")
+        await service.add_events_to_memory(
+            app_name="travel", user_id="alice", events=[event], session_id="s1"
+        )
+        await service.add_memory(app_name="travel", user_id="alice", memories=[entry])
+
+    asyncio.run(calls())
+    paths = [p for p, _ in posts]
+    assert paths == ["/v1/memory.search", "/v1/memory.set_from_messages", "/v1/memory.set"]
+    search, extract, write = (body for _, body in posts)
+    assert (search["query"], search["top_k"], search["user_id"]) == ("seat", 3, "alice")
+    assert (search["namespace_scope"], search["bodies"], search["explain"]) == (
+        "this",
+        "full",
+        False,
+    )
+    assert (extract["user_id"], extract["session_id"]) == ("alice", "s1")
+    assert [m["content"] for m in extract["messages"]] == ["I prefer aisle seats"]
+    assert write["memory_key"].startswith("adk/") and write["user_id"] == "alice"
