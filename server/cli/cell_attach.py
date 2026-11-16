@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import sys
 import time
@@ -453,16 +454,22 @@ class Run:
         from server.core import pg
 
         await self.router.call("/attach/enforced", {"deployment_id": self.row["deployment_id"]})
-        # From the mode transaction on the mode may have risen: only the durable read can say.
-        self.mode = "unknown"
+
+        def mark(mode: str) -> None:
+            # `unknown` from a try's UPDATE on: only the durable read can say whether it
+            # landed; `recording` again when that try rolled back.
+            self.mode = mode
+
         try:
             async with pg.dedicated(statement_timeout_ms=_LOCK_STATEMENT_MS) as conn:
                 await apg.commit_enforced(
-                    conn, self.confirm_lock, self.ready_for_commit, self.wait, self.log
+                    conn, self.confirm_lock, self.ready_for_commit, self.wait, self.log, mark
                 )
         except Refused:
             raise
-        except Exception as e:  # noqa: BLE001 — the durable read says whether it landed
+        except Exception as e:
+            if self.mode != "unknown":
+                raise  # no try was in flight: nothing to decide
             self.log(f"the mode commit's outcome is unknown ({type(e).__name__}: {e})")
             async with pg.dedicated(statement_timeout_ms=_LOCK_STATEMENT_MS) as conn:
                 await apg.end_mode_transactions(conn, self.confirm_lock)
@@ -573,6 +580,8 @@ class Run:
                 raise Refused(writers)
         finally:
             task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
         await self.final_checks(watch)
         row = await self.router.call("")
         current, nxt = self.own_fp
@@ -757,7 +766,12 @@ def cmd_attach(args: argparse.Namespace) -> int:
 def add_attach_parser(csub: Any) -> None:
     p = csub.add_parser("attach", help="Attach the prepared first cell: place its orgs, serve.")
     p.add_argument("--cell", required=True, help="This cell's name (LOOM_CELL)")
-    p.add_argument("--wait", type=int, default=_WAIT_S, help="Seconds the waits share")
+    p.add_argument(
+        "--wait",
+        type=int,
+        default=_WAIT_S,
+        help="Seconds of wall time the waits share; 0 runs one try of each, with no retry",
+    )
     p.add_argument(
         "--scan-budget", type=int, default=_SCAN_BUDGET_S, help="Seconds one full org scan may take"
     )

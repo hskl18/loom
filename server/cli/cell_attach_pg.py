@@ -24,6 +24,8 @@ _sleep = asyncio.sleep  # the seam the wait tests replace
 
 # The pause between polls of a wait.
 POLL_S = 1.0  # not a setting: a poll interval
+# The least lock wait a try gets, however little of --wait is left.
+TRY_FLOOR_MS = 100  # not a setting: one try's floor
 # The migration lock's wait a trigger try (a boot holds it for its migrations), in ms; a
 # try never waits longer than --wait has left.
 _MIGRATION_LOCK_MS = 10_000  # not a setting: one try's bound
@@ -67,8 +69,10 @@ class Wait:
             self._since = None
 
     def bound_ms(self, most_ms: int) -> int:
-        """A lock timeout for one try: `most_ms`, or what is left when that is less."""
-        return min(most_ms, int(self.left() * 1000))
+        """A lock timeout for one try: `most_ms`, or what is left when that is less, and
+        never under `TRY_FLOOR_MS`: every try runs once, so `--wait 0` is one try of each
+        wait with no retry, and only after a try is the wait judged spent."""
+        return max(TRY_FLOOR_MS, min(most_ms, int(self.left() * 1000)))
 
     async def pause(self, seconds: float = POLL_S) -> bool:
         """Wait `seconds` (at most what is left); False once none is left."""
@@ -88,6 +92,13 @@ def _split(key: int) -> str:
         "AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())"
     )
 
+
+# Who holds an advisory lock (`where` from `_split`), never a query's text.
+_ADVISORY_HOLDER = """
+SELECT l.pid, a.application_name, a.backend_start
+FROM pg_locks l LEFT JOIN pg_stat_activity a ON a.pid = l.pid
+WHERE {where} AND l.granted
+"""
 
 _LOCK_HOLDER = f"""
 SELECT l.pid, a.application_name, a.backend_start, a.client_addr::text AS client
@@ -467,6 +478,11 @@ async def _ensure_table(
                 "attach's role cannot alter it: make the role a member of its owner role",
             )
         if not await wait.pause():
+            if outcome.holders.startswith(_MIGRATION_HELD):
+                return Refusal(
+                    f"postgres loom.{table}",
+                    f"its triggers were not created within --wait: {outcome.holders}",
+                )
             return _busy_refusal(table, await cell_triggers.holders(conn, table))
         # Said again only when the holders change: a retry a second is otherwise silent.
         if outcome.holders != said:
@@ -474,29 +490,45 @@ async def _ensure_table(
             log(f"loom.{table}: its lock is busy ({said or 'no holder named'}); retrying")
 
 
+_MIGRATION_HELD = "the migration lock"
+
+
+async def _migration_holder(conn: Any, key: int) -> str:
+    """`the migration lock (held by …)`, naming the session that holds it."""
+    try:
+        rows = await conn.fetch(_ADVISORY_HOLDER.format(where=_split(key)))
+    except Exception as e:  # noqa: BLE001 — naming the holder is best effort
+        return f"{_MIGRATION_HELD} (its holder not read: {type(e).__name__})"
+    held = "; ".join(
+        f"pid {r['pid']}, {r['application_name'] or 'no name'}, since {r['backend_start']}"
+        for r in rows
+    )
+    return f"{_MIGRATION_HELD} (held by {held or 'a session that just ended'})"
+
+
 async def _ensure_one(conn: Any, table: str, most_ms: int, wait: Wait) -> cell_triggers.Outcome:
     """One try under the migration lock: the migration lock's wait, and then the DDL's lock
-    wait (at most `most_ms`), each bounded by what `wait` has left when it starts."""
+    wait (at most `most_ms`), each bounded by what `wait` has left when it starts, with the
+    try floor. A busy migration lock answers `busy` naming that lock's holder."""
     from server.core.schema.pg_migrate import _LOCK_KEY
 
-    migration_ms = wait.bound_ms(_MIGRATION_LOCK_MS)
-    if migration_ms <= 0:
-        return cell_triggers.Outcome("busy")
-    await conn.execute(f"SET lock_timeout = '{migration_ms}ms'")
+    await conn.execute(f"SET lock_timeout = '{wait.bound_ms(_MIGRATION_LOCK_MS)}ms'")
     try:
         await conn.execute(_MIGRATION_LOCK, _LOCK_KEY)
     except Exception as e:
         if getattr(e, "sqlstate", None) == "55P03":
-            return cell_triggers.Outcome("busy")  # a boot migrating: the next try
+            # A boot migrating: the next try.
+            return cell_triggers.Outcome("busy", await _migration_holder(conn, _LOCK_KEY))
         raise
     finally:
         await conn.execute("RESET lock_timeout")
     try:
-        lock_ms = wait.bound_ms(most_ms)
-        if lock_ms <= 0:
-            return cell_triggers.Outcome("busy")
         return await cell_triggers.ensure_table(
-            conn, table, recording_first=True, lock_timeout=f"{lock_ms}ms", attempts=1
+            conn,
+            table,
+            recording_first=True,
+            lock_timeout=f"{wait.bound_ms(most_ms)}ms",
+            attempts=1,
         )
     finally:
         await conn.execute(_MIGRATION_UNLOCK, _LOCK_KEY)
@@ -543,21 +575,29 @@ async def commit_enforced(
     ready: Callable[[], Any],
     wait: Wait,
     log: Callable[[str], None],
+    mark: Callable[[str], None],
 ) -> None:
     """Raise the mode to `enforced` on `conn` (a session of its own, never the lock
     session): an EXCLUSIVE lock on loom.tenancy_mode a try, `_MODE_LOCK_MS` each (less
     when `wait` has less left), within `wait`; `confirm_lock` before each try and each
     termination (it refuses when another run holds the attach lock), and `ready` before
     each try (False skips the try while a process boots). After a failed try the in-flight
-    mode transaction, found by its lock, is ended. Raises Refused when `wait` runs out;
-    whether the commit landed is the durable read's to say."""
+    mode transaction, found by its lock, is ended. `mark` hears `unknown` just before a try
+    sends its UPDATE and `recording` when that try rolled back. Raises Refused when `wait`
+    runs out; whether the commit landed is the durable read's to say."""
     with wait.counting():
         while True:
             await confirm_lock()
-            lock_ms = wait.bound_ms(_MODE_LOCK_MS)
-            if lock_ms > 0 and await ready():
-                if await _mode_try(conn, lock_ms):
+            if await ready():
+                mark("unknown")
+                try:
+                    done = await _mode_try(conn, wait.bound_ms(_MODE_LOCK_MS))
+                except Refused:
+                    mark("recording")  # the UPDATE's transaction rolled back
+                    raise
+                if done:
                     return
+                mark("recording")
                 log("the mode's lock is busy; retrying")
                 await end_mode_transactions(conn, confirm_lock)
             if not await wait.pause():

@@ -13032,7 +13032,7 @@
            "nargs": null,
            "type": "builtins:int",
            "required": false,
-           "help": "Seconds the waits share",
+           "help": "Seconds of wall time the waits share; 0 runs one try of each, with no retry",
            "metavar": null
           },
           {

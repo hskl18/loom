@@ -250,7 +250,7 @@ async def test_wait_is_wall_time_lock_tries_included_and_no_scan(clock: _Clock) 
     wait = apg.Wait(4, clock)
     clock.now += 100  # a scan before the wait
     with pytest.raises(Refused, match="not taken within --wait"):
-        await apg.commit_enforced(conn, nothing, ready, wait, lambda _t: None)
+        await apg.commit_enforced(conn, nothing, ready, wait, lambda _t: None, lambda _m: None)
     assert clock.now - 100 <= 4 and wait.spent <= 4
     # A 2 s try, a 1 s pause, then a try that waits only the second left.
     assert [a.split("'")[1] for a in asked] == ["2000ms", "1000ms"]
@@ -290,7 +290,9 @@ async def test_the_trigger_pass_refuses_at_once_a_table_it_cannot_alter(
     wait = apg.Wait(10, clock)
     logged: list[str] = []
     (refusal,) = await apg.ensure_triggers(conn, wait, logged.append)
-    assert "not taken within --wait" in refusal.reason and wait.spent <= 10
+    # The last try ran with the floor's lock wait, after --wait was all but spent.
+    assert "not taken within --wait" in refusal.reason
+    assert wait.spent <= 10 + apg.TRY_FLOOR_MS / 1000 + 1e-9
     # Said once per change of holders, not once a try.
     assert logged == [
         "loom.scope_generations: its lock is busy (pid 7); retrying",
@@ -654,7 +656,9 @@ async def test_the_mode_commit_retries_a_busy_lock_and_ends_an_earlier_run(clock
         return True
 
     logged: list[str] = []
-    await apg.commit_enforced(conn, confirm, ready, apg.Wait(10, clock), logged.append)
+    await apg.commit_enforced(
+        conn, confirm, ready, apg.Wait(10, clock), logged.append, lambda _m: None
+    )
     assert logged == ["the mode's lock is busy; retrying"]
     # Before each try and the one termination.
     assert len(confirmed) == 3
@@ -692,7 +696,9 @@ async def test_the_mode_commit_refuses_past_wait_and_skips_a_try_while_booting(
         return False
 
     with pytest.raises(Refused, match="not taken within --wait"):
-        await apg.commit_enforced(conn, confirm, booting, apg.Wait(2, clock), lambda _t: None)
+        await apg.commit_enforced(
+            conn, confirm, booting, apg.Wait(2, clock), lambda _t: None, lambda _m: None
+        )
     assert not any("LOCK TABLE" in s for s in conn.executed)
 
 
@@ -789,8 +795,8 @@ async def test_a_stop_between_a_landed_commit_and_the_durable_read_says_the_outc
     async def dedicated(**_kw: Any) -> Any:
         yield None
 
-    async def landed(*_a: Any) -> None:
-        pass  # the commit landed; its answer may not have
+    async def landed(*a: Any) -> None:
+        a[-1]("unknown")  # the try sent its UPDATE; the commit landed, its answer may not have
 
     async def call(_self: Any, _path: str, _body: Any = None) -> dict[str, Any]:
         return {"cell": "first"}
@@ -839,21 +845,165 @@ async def test_doctor_names_both_catalog_checks_when_the_catalog_is_unread(
 
 
 @pytest.mark.asyncio
-async def test_the_ddl_lock_bound_is_taken_after_the_migration_lock(clock: _Clock) -> None:
-    """A migration lock that took the rest of --wait leaves no DDL try."""
+async def test_the_ddl_lock_bound_is_taken_after_the_migration_lock(
+    monkeypatch: pytest.MonkeyPatch, clock: _Clock
+) -> None:
+    """A migration lock that took the rest of --wait leaves the DDL its floor: one try, never
+    the full 100 ms when less is left, never none."""
+    from server.core import cell_triggers
 
     def migration_lock(*_a: Any) -> str:
-        clock.now += 2.0  # the rest of --wait
+        clock.now += 1.95  # all but 50 ms of --wait
         return "OK"
 
+    asked: list[str] = []
+
+    async def ensure_table(*_a: Any, lock_timeout: str, **_kw: Any) -> Any:
+        asked.append(lock_timeout)
+        return cell_triggers.Outcome("applied")
+
+    monkeypatch.setattr(cell_triggers, "ensure_table", ensure_table)
     conn = FakeConn([("pg_advisory_lock", migration_lock), ("pg_advisory_unlock", "OK")])
     wait = apg.Wait(2, clock)
     with wait.counting():
-        outcome = await apg._ensure_one(conn, "scope_generations", 100, wait)
-    assert outcome.answer == "busy"
-    assert not any(
-        "lock_timeout = '" in s and "ms'" in s and "SET LOCAL" in s for s in conn.executed
+        outcome = await apg._ensure_one(conn, "scope_generations", 500, wait)
+    assert outcome.answer == "applied"
+    assert asked == [f"{apg.TRY_FLOOR_MS}ms"]
+
+
+@pytest.mark.asyncio
+async def test_a_busy_migration_lock_is_named_as_such(
+    monkeypatch: pytest.MonkeyPatch, clock: _Clock
+) -> None:
+    from server.core import cell_triggers
+
+    class _Busy(Exception):
+        sqlstate = "55P03"
+
+    holder = [{"pid": 42, "application_name": "loom", "backend_start": "t0"}]
+    conn = FakeConn(
+        [
+            ("pg_advisory_lock", _Busy()),
+            ("l.locktype = 'advisory'", holder),
+            ("deadlock_timeout", 1000),
+        ]
     )
+
+    async def planned(_c: Any) -> list[str]:
+        return ["scope_generations"]
+
+    async def no_holders(_c: Any, _t: str) -> list[Any]:
+        return []
+
+    monkeypatch.setattr(cell_triggers, "planned_tables", planned)
+    monkeypatch.setattr(cell_triggers, "holders", no_holders)
+    logged: list[str] = []
+    (refusal,) = await apg.ensure_triggers(conn, apg.Wait(2, clock), logged.append)
+    named = "the migration lock (held by pid 42, loom, since t0)"
+    assert logged == [f"loom.scope_generations: its lock is busy ({named}); retrying"]
+    assert refusal.reason == f"its triggers were not created within --wait: {named}"
+
+
+@pytest.mark.asyncio
+async def test_wait_0_runs_one_try_of_each_wait(
+    clock: _Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On an idle database --wait 0 commits the mode and creates the triggers in one try
+    each, and the heartbeats pass when nothing boots."""
+    from server.core import cell_triggers
+
+    conn = FakeConn(
+        [
+            ("LOCK TABLE", "LOCK TABLE"),
+            ("UPDATE loom.tenancy_mode", "UPDATE 1"),
+            ("l.mode = 'ExclusiveLock'", []),
+        ]
+    )
+    marks: list[str] = []
+
+    async def ok() -> bool:
+        return True
+
+    async def nothing() -> None:
+        pass
+
+    await apg.commit_enforced(conn, nothing, ok, apg.Wait(0, clock), lambda _t: None, marks.append)
+    assert marks == ["unknown"]
+    assert any(f"lock_timeout = '{apg.TRY_FLOOR_MS}ms'" in sql for sql in conn.executed)
+
+    async def planned(_c: Any) -> list[str]:
+        return ["scope_generations"]
+
+    async def no_holders(_c: Any, _t: str) -> list[Any]:
+        return []
+
+    async def applied(*_a: Any, **_kw: Any) -> Any:
+        return cell_triggers.Outcome("applied")
+
+    async def no_defects(_c: Any) -> list[Any]:
+        return []
+
+    monkeypatch.setattr(cell_triggers, "planned_tables", planned)
+    monkeypatch.setattr(cell_triggers, "holders", no_holders)
+    monkeypatch.setattr(cell_triggers, "ensure_table", applied)
+    monkeypatch.setattr(cell_triggers, "missing", no_defects)
+    ddl = FakeConn([("deadlock_timeout", 1000)])
+    assert await apg.ensure_triggers(ddl, apg.Wait(0, clock), lambda _t: None) == []
+
+    async def read() -> list[beats.Beat]:
+        return [_beat("a")]
+
+    assert (await beats.settle(read, _judge, apg.Wait(0, clock))).live == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("refused_before_any_try", [True, False])
+async def test_a_mode_commit_refused_without_a_landed_try_says_recording(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    clock: _Clock,
+    refused_before_any_try: bool,
+) -> None:
+    """The closing line says recording when no try sent its UPDATE (the heartbeats refused
+    before one) and when every try timed out and rolled back."""
+
+    def lock(*_a: Any) -> str:
+        raise _Timeout()
+
+    conn = FakeConn([("LOCK TABLE", lock), ("l.mode = 'ExclusiveLock'", [])])
+
+    async def call(_self: Any, _path: str, _body: Any = None) -> dict[str, Any]:
+        return {"cell": "first"}
+
+    async def ready(_self: Any) -> bool:
+        if refused_before_any_try:
+            raise Refused([Refusal("process p1", "runs with LOOM_CELL unset")])
+        return True
+
+    async def confirm(_self: Any) -> None:
+        pass
+
+    async def run(self: Any) -> int:
+        self.row, self.mode = {"deployment_id": "dep-1"}, "recording"
+        self.wait = apg.Wait(2, clock)
+        await self.commit_mode()
+        return 0
+
+    from contextlib import asynccontextmanager
+
+    from server.core import pg
+
+    @asynccontextmanager
+    async def dedicated(**_kw: Any) -> Any:
+        yield conn
+
+    monkeypatch.setattr(pg, "dedicated", dedicated)
+    monkeypatch.setattr(cell_attach.Router, "call", call)
+    monkeypatch.setattr(cell_attach.Run, "ready_for_commit", ready)
+    monkeypatch.setattr(cell_attach.Run, "confirm_lock", confirm)
+    monkeypatch.setattr(cell_attach.Run, "run", run)
+    assert await cell_attach.attach(None, _args(), httpx.URL("http://127.0.0.1:7900")) == 1
+    assert capsys.readouterr().err.splitlines()[-1] == "loom cell attach: the cell stays recording"
 
 
 @pytest.mark.asyncio

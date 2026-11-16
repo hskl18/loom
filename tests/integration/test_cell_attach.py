@@ -482,7 +482,9 @@ async def test_the_mode_commit_waits_out_a_for_share_holder(cell_stores) -> None
             await tx.rollback()
 
         task = asyncio.create_task(release())
-        await cell_attach_pg.commit_enforced(conn, ok, ok, cell_attach_pg.Wait(20), logged.append)
+        await cell_attach_pg.commit_enforced(
+            conn, ok, ok, cell_attach_pg.Wait(20), logged.append, lambda _m: None
+        )
         await task
     assert await _mode() == "enforced"
     assert logged == ["the mode's lock is busy; retrying"]
@@ -745,3 +747,16 @@ async def test_attach_exempts_the_role_it_runs_as_and_doctor_does_not(cell_store
             await conn.execute(f"DROP OWNED BY {role}")
         await _admin(f"DROP OWNED BY {role}")
         await _admin(f"DROP ROLE {role}")
+
+
+@pytest.mark.asyncio
+async def test_wait_0_attaches_an_idle_cell(cell_stores, capsys) -> None:
+    """--wait 0 is one try of each wait, no retry: an idle cell still reaches serving."""
+    stores, network = cell_stores, _Network()
+    await _prepare(stores, network)
+    org = stores["tag"] + "w0"
+    await pg.execute("INSERT INTO loom.scope_generations (org, scope) VALUES ($1, '*')", org)
+    capsys.readouterr()
+    assert await _attach(stores, network, wait=0) == 0, capsys.readouterr().err
+    assert json.loads(capsys.readouterr().out)["state"] == "serving"
+    assert org in await _placed()
