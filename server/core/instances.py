@@ -56,7 +56,7 @@ _PRUNE_EVERY_S = 600.0
 # How old a row's last beat is before the leader drops its key. A contract across builds,
 # not a tunable: attach reads stopped rows back that far (`read_recent`) while the leader
 # that sweeps them may run another build, so a change is a design change of its own.
-PRUNE_AFTER_S = 3600
+PRUNE_AFTER_S = 3600  # not a setting: a contract across builds
 
 # (pid, instance id, start time) of this process.
 _process: tuple[int, str, datetime] | None = None
@@ -134,16 +134,6 @@ def live_window_s() -> float:
     return _LIVE_INTERVALS * float(settings.instance_heartbeat_seconds)
 
 
-def widened_window_s() -> float:
-    """The live window plus what a stopping process still does after its stop beat: it
-    drains its ClickHouse writes, then settles cut-off ones. A process whose last beat,
-    stopped or not, is younger than this may still write."""
-    from server.boot import SHUTDOWN_DRAIN_BUDGET_S
-    from server.insights.app.provider_barrier import SHUTDOWN_RETIRE_S
-
-    return live_window_s() + SHUTDOWN_DRAIN_BUDGET_S + SHUTDOWN_RETIRE_S
-
-
 def boot_allowance_s() -> float:
     """How long a booting process takes to report its first cell row and its first router
     answer: two beats and one router read."""
@@ -217,10 +207,12 @@ async def read_live(ch: Any, *, all_deployments: bool = False) -> list[dict[str,
     return out
 
 
-async def read_recent(ch: Any, *, since: str | None = None) -> list[dict[str, Any]]:
-    """Every process of every deployment sharing this ClickHouse whose widened window
-    (`widened_window_s`) reaches past `since` (a ClickHouse `DateTime64(3)` as text), or
-    past now without one: stopped rows included, which `read_live` drops. `stopped` is its
+async def read_recent(
+    ch: Any, *, window_s: float, since: str | None = None
+) -> list[dict[str, Any]]:
+    """Every process of every deployment sharing this ClickHouse whose last beat plus
+    `window_s` reaches past `since` (a ClickHouse `DateTime64(3)` as text), or past now
+    without one: stopped rows included, which `read_live` drops. `stopped` is its
     newest row's flag and `live` whether that row is inside the live window and not
     stopped, both judged in ClickHouse."""
     rows = await ch.query_all(
@@ -238,7 +230,7 @@ async def read_recent(ch: Any, *, since: str | None = None) -> list[dict[str, An
         """,
         params={
             "live": int(live_window_s() * 1000),
-            "wide": int(widened_window_s() * 1000),
+            "wide": int(window_s * 1000),
             "since": since or "",
         },
     )
@@ -397,5 +389,4 @@ __all__ = [
     "start",
     "stop",
     "tick",
-    "widened_window_s",
 ]

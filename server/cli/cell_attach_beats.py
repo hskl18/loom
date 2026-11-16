@@ -32,6 +32,16 @@ from server.core import cell, instances
 StoppedUnset = Literal["refuse", "wait"]
 
 
+def widened_window_s() -> float:
+    """The live window plus what a stopping process still does after its stop beat: it
+    drains its ClickHouse writes, then settles cut-off ones. A process whose last beat,
+    stopped or not, is younger than this may still write."""
+    from server.boot import SHUTDOWN_DRAIN_BUDGET_S
+    from server.insights.app.provider_barrier import SHUTDOWN_RETIRE_S
+
+    return instances.live_window_s() + SHUTDOWN_DRAIN_BUDGET_S + SHUTDOWN_RETIRE_S
+
+
 @dataclass(frozen=True)
 class Beat:
     """One process: its instance row (`live`: inside the live window and not stopped) and
@@ -48,7 +58,7 @@ class Beat:
 
 
 async def read_beats(ch: Any, *, since: str | None = None) -> list[Beat]:
-    rows = await instances.read_recent(ch, since=since)
+    rows = await instances.read_recent(ch, window_s=widened_window_s(), since=since)
     ids = [str(r["instance_id"]) for r in rows]
     cells = await ch.query_all(
         f"SELECT instance_id, cell, tenancy_mode, fingerprint FROM {instances.CELL_TABLE} "
@@ -236,7 +246,7 @@ _SKEW_S = 10.0  # not a setting: a margin for clock skew between ClickHouse host
 def watch_period_s() -> float:
     """`T'`: how long a row whose window reaches past the rescan's start is kept before the
     leader's sweep may drop it, less a margin for clock skew."""
-    return instances.PRUNE_AFTER_S - instances.widened_window_s() - _SKEW_S
+    return instances.PRUNE_AFTER_S - widened_window_s() - _SKEW_S
 
 
 class Watch:
