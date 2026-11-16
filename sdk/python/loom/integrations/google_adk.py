@@ -179,8 +179,8 @@ class LoomMemoryService(BaseMemoryService):
         return SearchMemoryResponse(
             memories=[
                 MemoryEntry(
-                    # Only a memory has a key memory.delete takes. A conversation's passage
-                    # names the fact extracted from it, yet deleting that fact keeps it.
+                    # Only a fact is deleted by its key; a chunk outlives the fact it names
+                    # and a summary has no key, so erasure removes both.
                     id=_entry_id(hit.memory_key, hit.session_id) if hit.source == "fact" else None,
                     content=types.Content(
                         role="user", parts=[types.Part(text=hit.content_excerpt)]
@@ -261,7 +261,8 @@ def _loom_session(user_id: str, session_id: str) -> str:
 
 
 def _digest(*parts: str) -> str:
-    """The first 20 hex of the sha256 of `parts`, encoded so no two tuples meet."""
+    """The first 20 hex of the sha256 of `parts` as a JSON list, so two different tuples
+    never hash the same text."""
     return hashlib.sha256(json.dumps(parts).encode()).hexdigest()[:20]
 
 
