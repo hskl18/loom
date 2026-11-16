@@ -472,3 +472,16 @@ def test_a_user_id_that_names_no_loom_user_is_refused(user: str) -> None:
         with pytest.raises(ValueError, match="names none"):
             asyncio.run(call)
     assert fake.calls == []
+
+
+def test_a_long_session_is_sent_in_batches_the_server_takes() -> None:
+    fake = _FakeMemory()
+    events = [Event(author="user", content=_user(f"fact {i}")) for i in range(401)]
+    asyncio.run(
+        _service(fake).add_events_to_memory(
+            app_name="travel", user_id="alice", events=events, session_id="s1"
+        )
+    )
+    sizes = [len(c[1][0]) for c in fake.calls if c[0] == "set_from_messages"]
+    assert sizes == [400, 1]
+    assert {c[2]["session_id"] for c in fake.calls} == {_loom_session("alice", "s1")}

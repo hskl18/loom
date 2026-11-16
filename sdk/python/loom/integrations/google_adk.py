@@ -64,6 +64,10 @@ if TYPE_CHECKING:
     from loom.agent import Agent
 
 
+# The server's cap on the messages of one memory.set_from_messages call.
+_MAX_MESSAGES = 400
+
+
 class LoomMemoryService(BaseMemoryService):
     """ADK ``BaseMemoryService`` over a Loom ``Agent``, for one ADK app.
 
@@ -133,7 +137,7 @@ class LoomMemoryService(BaseMemoryService):
             if not text:
                 continue
             # The user is in the key: Loom files a long value's passages by key alone.
-            digest = hashlib.sha256(f"{user_id}\0{text}".encode()).hexdigest()[:20]
+            digest = _digest(user_id, text)
             await self._agent.memory.set(
                 f"{self._key_prefix}/{digest}",
                 text,
@@ -212,11 +216,13 @@ class LoomMemoryService(BaseMemoryService):
                         "timestamp": datetime.fromtimestamp(event.timestamp, UTC).isoformat(),
                     }
                 )
-        if messages:
+        session = _loom_session(user_id, session_id)
+        # memory.set_from_messages takes at most _MAX_MESSAGES messages a call.
+        for start in range(0, len(messages), _MAX_MESSAGES):
             await self._agent.memory.set_from_messages(
-                messages,
+                messages[start : start + _MAX_MESSAGES],
                 user_id=user_id,
-                session_id=_loom_session(user_id, session_id),
+                session_id=session,
                 defer=self._defer,
             )
 
@@ -224,8 +230,12 @@ class LoomMemoryService(BaseMemoryService):
 def _loom_session(user_id: str, session_id: str) -> str:
     """The Loom session of an ADK user's session: ADK makes a session id unique per
     user only, and Loom files a turn's verbatim chunks by session alone."""
-    pair = json.dumps([user_id, session_id])
-    return f"adk-{hashlib.sha256(pair.encode()).hexdigest()[:20]}"
+    return f"adk-{_digest(user_id, session_id)}"
+
+
+def _digest(*parts: str) -> str:
+    """The first 20 hex of the sha256 of `parts`, encoded so no two tuples meet."""
+    return hashlib.sha256(json.dumps(parts).encode()).hexdigest()[:20]
 
 
 def _iso_time(text: str | None) -> datetime | None:
