@@ -10,8 +10,9 @@ and the ClickHouse writer check do, so attach and doctor print the same names.""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -23,38 +24,59 @@ _sleep = asyncio.sleep  # the seam the wait tests replace
 
 # The pause between polls of a wait.
 POLL_S = 1.0  # not a setting: a poll interval
-# The migration lock's wait a trigger try (a boot holds it for its migrations).
-_MIGRATION_LOCK_TIMEOUT = "10s"
-# The mode commit's lock wait a try, and the statement bound above it.
-_MODE_LOCK_TIMEOUT = "2s"
-_MODE_STATEMENT_TIMEOUT = "5s"
+# The migration lock's wait a trigger try (a boot holds it for its migrations), in ms; a
+# try never waits longer than --wait has left.
+_MIGRATION_LOCK_MS = 10_000  # not a setting: one try's bound
+# The mode commit's lock wait a try, in ms, and its statement bound's margin above it.
+_MODE_LOCK_MS = 2_000  # not a setting: one try's bound
+_MODE_STATEMENT_MARGIN_MS = 3_000  # not a setting: a margin over the lock wait
 # The server ends the lock session soon after its client is gone, releasing the lock.
 _KEEPALIVE = {"tcp_keepalives_idle": "30", "tcp_keepalives_interval": "10"}
 
 
 class Wait:
-    """`--wait`: the seconds attach's waits share, counting only the time spent waiting
-    (never scan time)."""
+    """`--wait`: the wall-clock seconds attach's bounded waits share. Each wait runs inside
+    `counting()`, which charges its elapsed time, lock tries included; time outside every
+    wait (a scan) is never charged."""
 
     def __init__(self, seconds: float, clock: Callable[[], float] = time.monotonic) -> None:
         self.seconds = float(seconds)
         self.spent = 0.0
         self._clock = clock
+        self._since: float | None = None
+
+    def used(self) -> float:
+        """The seconds charged so far, the wait running now included."""
+        running = 0.0 if self._since is None else self._clock() - self._since
+        return self.spent + running
 
     def left(self) -> float:
-        return max(0.0, self.seconds - self.spent)
+        return max(0.0, self.seconds - self.used())
 
-    def now(self) -> float:
-        return self._clock()
+    @contextlib.contextmanager
+    def counting(self) -> Iterator[None]:
+        """Charge the block's wall time (a block inside another is charged once)."""
+        if self._since is not None:
+            yield
+            return
+        self._since = self._clock()
+        try:
+            yield
+        finally:
+            self.spent += self._clock() - self._since
+            self._since = None
+
+    def bound_ms(self, most_ms: int) -> int:
+        """A lock timeout for one try: `most_ms`, or what is left when that is less."""
+        return min(most_ms, int(self.left() * 1000))
 
     async def pause(self, seconds: float = POLL_S) -> bool:
-        """Wait `seconds` (at most what is left) and count them; False once none is left."""
+        """Wait `seconds` (at most what is left); False once none is left."""
         step = min(seconds, self.left())
         if step <= 0:
             return False
-        start = self._clock()
-        await _sleep(step)
-        self.spent += max(step, self._clock() - start)
+        with self.counting():
+            await _sleep(step)
         return True
 
 
@@ -137,7 +159,7 @@ async def take_lock(conn: Any, what: str) -> None:
             [
                 Refusal(
                     "attach lock",
-                    f"held by {holder}: an attach, prepare or update is running; {what} "
+                    f"held by {holder}: an attach or a prepare is running; {what} "
                     "runs one at a time",
                 )
             ]
@@ -364,14 +386,22 @@ WHERE NOT held
 """
 
 
-async def own_role_refusals(conn: Any, tables: Iterable[str]) -> list[Refusal]:
-    """What attach's own role lacks (the guarded tables' owner roles are `missing`'s
-    `owner` defects), and a server that allows prepared transactions."""
+async def own_role_refusals(conn: Any, tables: list[Any]) -> list[Refusal]:
+    """What attach's own role lacks, `tables` being the rows `cell_triggers.ORG_TABLES`
+    read: its grants, `SELECT` on every org table, and membership in the owner role of every
+    table it gives triggers (or the trigger pass could not alter it); and a server that
+    allows prepared transactions."""
     role = await conn.fetchval("SELECT current_user")
     lacks = [str(r["need"]) for r in await conn.fetch(_OWN_GRANTS)]
-    for table in tables:
-        if not await conn.fetchval("SELECT has_table_privilege($1, 'SELECT')", table):
-            lacks.append(f"SELECT on {table}")
+    for r in tables:
+        if not await conn.fetchval(
+            "SELECT has_table_privilege($1, 'SELECT')", f"loom.{r['relname']}"
+        ):
+            lacks.append(f"SELECT on loom.{r['relname']}")
+    planned = set(cell_triggers.planned_names(tables))
+    for r in tables:
+        if r["relname"] in planned and not r["owned"]:
+            lacks.append(f"membership in the owner role of loom.{r['relname']}")
     out = [Refusal(f"postgres role {role}", f"attach's role lacks {n}") for n in lacks]
     out += await prepared_refusals(conn)
     return out
@@ -400,51 +430,66 @@ async def ensure_triggers(conn: Any, wait: Wait, log: Callable[[str], None]) -> 
     """Give every planned table its triggers (`cell_triggers.ensure_table` with
     `recording_first`), one try at a time under the migration lock, retrying a table whose
     lock is busy a second apart within `wait`; one autovacuum holding it is asked to yield
-    by one try just past `deadlock_timeout`. Then `missing`: any defect refuses."""
-    from server.core.schema.pg_migrate import _LOCK_KEY
-
+    by one try just past `deadlock_timeout`. A table this role cannot alter refuses at once.
+    Then `missing`: any defect refuses."""
     deadlock_ms = int(
         await conn.fetchval(
             "SELECT setting::int * CASE unit WHEN 's' THEN 1000 ELSE 1 END "
             "FROM pg_settings WHERE name = 'deadlock_timeout'"
         )
     )
-    out: list[Refusal] = []
-    for table in await cell_triggers.planned_tables(conn):
-        yielded = False
-        while True:
-            lock_timeout = cell_triggers.LOCK_TIMEOUT
-            holders = await cell_triggers.holders(conn, table)
-            if not yielded and any(h["backend_type"] == "autovacuum worker" for h in holders):
-                lock_timeout, yielded = f"{deadlock_ms + 500}ms", True
-            done = await _ensure_one(conn, table, lock_timeout, _LOCK_KEY)
-            if done:
-                break
-            if not await wait.pause():
-                out.append(_busy_refusal(table, await cell_triggers.holders(conn, table)))
-                break
-            log(f"loom.{table}: its lock is busy; retrying")
-    if out:
-        return out
+    with wait.counting():
+        for table in await cell_triggers.planned_tables(conn):
+            if refusal := await _ensure_table(conn, table, deadlock_ms, wait, log):
+                return [refusal]
     return [Refusal("postgres triggers", d.text) for d in await cell_triggers.missing(conn)]
 
 
-async def _ensure_one(conn: Any, table: str, lock_timeout: str, key: int) -> bool:
-    await conn.execute(f"SET lock_timeout = '{_MIGRATION_LOCK_TIMEOUT}'")
+async def _ensure_table(
+    conn: Any, table: str, deadlock_ms: int, wait: Wait, log: Callable[[str], None]
+) -> Refusal | None:
+    yielded = False
+    while True:
+        lock_ms = 100
+        holders = await cell_triggers.holders(conn, table)
+        if not yielded and any(h["backend_type"] == "autovacuum worker" for h in holders):
+            lock_ms, yielded = deadlock_ms + 500, True
+        lock_ms = wait.bound_ms(lock_ms)
+        result = "busy" if lock_ms <= 0 else await _ensure_one(conn, table, lock_ms, wait)
+        if result == "applied":
+            return None
+        if result == "denied":
+            return Refusal(
+                f"postgres loom.{table}",
+                "attach's role cannot alter it: make the role a member of its owner role",
+            )
+        if not await wait.pause():
+            return _busy_refusal(table, await cell_triggers.holders(conn, table))
+        log(f"loom.{table}: its lock is busy; retrying")
+
+
+async def _ensure_one(conn: Any, table: str, lock_ms: int, wait: Wait) -> str:
+    """One try under the migration lock, whose own wait is bounded by what `wait` has left."""
+    from server.core.schema.pg_migrate import _LOCK_KEY
+
+    migration_ms = wait.bound_ms(_MIGRATION_LOCK_MS)
+    if migration_ms <= 0:
+        return "busy"
+    await conn.execute(f"SET lock_timeout = '{migration_ms}ms'")
     try:
-        await conn.execute(_MIGRATION_LOCK, key)
+        await conn.execute(_MIGRATION_LOCK, _LOCK_KEY)
     except Exception as e:
         if getattr(e, "sqlstate", None) == "55P03":
-            return False  # a boot migrating: the next try
+            return "busy"  # a boot migrating: the next try
         raise
     finally:
         await conn.execute("RESET lock_timeout")
     try:
         return await cell_triggers.ensure_table(
-            conn, table, recording_first=True, lock_timeout=lock_timeout, attempts=1
+            conn, table, recording_first=True, lock_timeout=f"{lock_ms}ms", attempts=1
         )
     finally:
-        await conn.execute(_MIGRATION_UNLOCK, key)
+        await conn.execute(_MIGRATION_UNLOCK, _LOCK_KEY)
 
 
 def _busy_refusal(table: str, holders: list[Any]) -> Refusal:
@@ -487,49 +532,56 @@ async def commit_enforced(
     log: Callable[[str], None],
 ) -> None:
     """Raise the mode to `enforced` on `conn` (a session of its own, never the lock
-    session): an EXCLUSIVE lock on loom.tenancy_mode a try, `_MODE_LOCK_TIMEOUT` each,
-    within `wait`; `confirm_lock` before each try and each termination (it refuses when
-    another run holds the attach lock), and `ready` before each try (False skips the try
-    while a process boots). After a failed try the in-flight mode transaction, found by its
-    lock, is ended. Raises Refused when `wait` runs out; whether the commit landed is the
-    durable read's to say."""
-    while True:
-        await confirm_lock()
-        if await ready():
-            try:
-                async with conn.transaction():
-                    await conn.execute(f"SET LOCAL lock_timeout = '{_MODE_LOCK_TIMEOUT}'")
-                    await conn.execute(f"SET LOCAL statement_timeout = '{_MODE_STATEMENT_TIMEOUT}'")
-                    await conn.execute("LOCK TABLE loom.tenancy_mode IN EXCLUSIVE MODE")
-                    status = await conn.execute(
-                        "UPDATE loom.tenancy_mode SET mode = 'enforced', since = now()"
-                    )
-                    if status != "UPDATE 1":
-                        raise Refused(
-                            [
-                                Refusal(
-                                    "postgres loom.tenancy_mode", f"the mode update read {status}"
-                                )
-                            ]
-                        )
-                return
-            except Refused:
-                raise
-            except Exception as e:
-                if getattr(e, "sqlstate", None) not in _TIMED_OUT:
-                    raise
+    session): an EXCLUSIVE lock on loom.tenancy_mode a try, `_MODE_LOCK_MS` each (less
+    when `wait` has less left), within `wait`; `confirm_lock` before each try and each
+    termination (it refuses when another run holds the attach lock), and `ready` before
+    each try (False skips the try while a process boots). After a failed try the in-flight
+    mode transaction, found by its lock, is ended. Raises Refused when `wait` runs out;
+    whether the commit landed is the durable read's to say."""
+    with wait.counting():
+        while True:
+            await confirm_lock()
+            lock_ms = wait.bound_ms(_MODE_LOCK_MS)
+            if lock_ms > 0 and await ready():
+                if await _mode_try(conn, lock_ms):
+                    return
                 log("the mode's lock is busy; retrying")
-            await end_mode_transactions(conn, confirm_lock)
-        if not await wait.pause():
-            raise Refused(
-                [
-                    Refusal(
-                        "postgres loom.tenancy_mode",
-                        "its lock was not taken within --wait: a long transaction reads it "
-                        "FOR SHARE; rerun attach",
-                    )
-                ]
+                await end_mode_transactions(conn, confirm_lock)
+            if not await wait.pause():
+                raise Refused(
+                    [
+                        Refusal(
+                            "postgres loom.tenancy_mode",
+                            "its lock was not taken within --wait: a long transaction reads "
+                            "it FOR SHARE; rerun attach",
+                        )
+                    ]
+                )
+
+
+async def _mode_try(conn: Any, lock_ms: int) -> bool:
+    """One try of the mode commit, its lock wait `lock_ms`; False when it timed out."""
+    try:
+        async with conn.transaction():
+            await conn.execute(f"SET LOCAL lock_timeout = '{lock_ms}ms'")
+            await conn.execute(
+                f"SET LOCAL statement_timeout = '{lock_ms + _MODE_STATEMENT_MARGIN_MS}ms'"
             )
+            await conn.execute("LOCK TABLE loom.tenancy_mode IN EXCLUSIVE MODE")
+            status = await conn.execute(
+                "UPDATE loom.tenancy_mode SET mode = 'enforced', since = now()"
+            )
+            if status != "UPDATE 1":
+                raise Refused(
+                    [Refusal("postgres loom.tenancy_mode", f"the mode update read {status}")]
+                )
+        return True
+    except Refused:
+        raise
+    except Exception as e:
+        if getattr(e, "sqlstate", None) not in _TIMED_OUT:
+            raise
+        return False
 
 
 async def end_mode_transactions(conn: Any, confirm_lock: Callable[[], Any]) -> None:
@@ -626,6 +678,11 @@ async def wait_transactions(conn: Any, xmax: int, wait: Wait) -> None:
     """Wait until no backend of the cell's database holds an xid or a snapshot older than
     `xmax`; Refused at once on a prepared transaction or an unreadable row, and past
     `wait` naming each backend waited on and each other database's horizon holder."""
+    with wait.counting():
+        await _wait_transactions(conn, xmax, wait)
+
+
+async def _wait_transactions(conn: Any, xmax: int, wait: Wait) -> None:
     while True:
         if refusals := await prepared_refusals(conn):
             raise Refused(refusals)

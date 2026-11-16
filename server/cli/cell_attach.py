@@ -365,9 +365,9 @@ class Run:
         out += await self.catalog_refusals()
         out += await self.durability_refusals()
         rows = await self.lock_conn.fetch(cell_triggers.ORG_TABLES)
-        tables_pg = [f"loom.{r['relname']}" for r in rows]
-        out += await apg.own_role_refusals(self.lock_conn, tables_pg)
+        out += await apg.own_role_refusals(self.lock_conn, list(rows))
         out += await self.ch_limit_refusals()
+        out += beats.prune_window_refusals()
         if out:
             raise Refused(out)
         state, _ = await apg.read_mode(self.lock_conn)
@@ -449,6 +449,8 @@ class Run:
     async def commit_mode(self) -> None:
         from server.core import pg
 
+        # From here on the mode may have risen: only the durable read can say.
+        self.mode = "unknown"
         await self.router.call("/attach/enforced", {"deployment_id": self.row["deployment_id"]})
         try:
             async with pg.dedicated(statement_timeout_ms=_LOCK_STATEMENT_MS) as conn:
@@ -465,22 +467,29 @@ class Run:
     async def durable(self) -> int:
         """The durable read of `enforced`, retried within `--wait`; then X, the snapshot's
         xmax, above the read's own xid."""
-        from server.core import pg_profile
+        from server.core import pg, pg_profile
 
-        while True:
-            try:
+        with self.wait.counting():
+            while True:
                 if await pg_profile.standby_now() != "synchronous":
                     raise _refused("postgres standbys", "not synchronous before the durable read")
-                read = await apg.durable_read()
+                try:
+                    read = await apg.durable_read()
+                except Exception as e:
+                    # A try cut off by its bound, or an outage: its outcome is unknown, and
+                    # the next try reads again. Anything else is no reason to retry.
+                    outage = pg.is_outage(e) or isinstance(e, pg.PostgresUnavailableError)
+                    if not (isinstance(e, TimeoutError) or outage):
+                        raise
+                    self.log(f"the durable read failed ({type(e).__name__}); retrying")
+                    if not await self.wait.pause():
+                        raise _refused(
+                            "postgres durable read", "did not commit within --wait"
+                        ) from e
+                    continue
                 if await pg_profile.standby_now() != "synchronous":
                     raise _refused("postgres standbys", "not synchronous after the durable read")
                 break
-            except Refused:
-                raise
-            except Exception as e:
-                self.log(f"the durable read failed ({type(e).__name__}); retrying")
-                if not await self.wait.pause():
-                    raise _refused("postgres durable read", "did not commit within --wait") from e
         if read.first != (True, self.name) or read.mode != "enforced":
             raise _refused(
                 "postgres cell state",
@@ -540,8 +549,6 @@ class Run:
         await self.cheap_checks("wait")
         since = str((await self.ch.query_one("SELECT toString(now64(3)) AS t"))["t"])
         watch = beats.Watch(self.ch, since, self.name)
-        if refusals := watch.refusals_up_front():
-            raise Refused(refusals)
         task = asyncio.create_task(watch.run())
         try:
             listed = await cell_scan.list_tables(self.ch, self.lock_conn, topology, names)
@@ -567,7 +574,8 @@ class Run:
         if (row.get("current_fp"), row.get("next_fp")) != (current, nxt):
             raise _refused(
                 "postgres loom.cell_self",
-                "differs from the directory's fingerprints (a loom cell update between them?)",
+                "differs from the directory's fingerprints (a fingerprinted setting changed "
+                "during attach?)",
             )
         state, _ = await apg.read_mode(self.lock_conn)
         if state != "enforced":
@@ -596,7 +604,9 @@ class Run:
         if state != "enforced":
             raise _refused(
                 "postgres cell state",
-                f"the directory says serving and the cell reads {state}: run loom cell restore",
+                f"the directory says serving and the cell reads {state}: the directory and the "
+                "cell's Postgres disagree, as after a restore of one of them; attach lowers "
+                "and repairs neither",
             )
         return True
 
@@ -606,8 +616,8 @@ class Run:
             await self.done()
             self.report.update(state="serving", done=True)
             return 0
-        await self.open_lock()
         try:
+            await self.open_lock()
             await self.read_own_row()
             topology, names, listed = await self.refusals()
             if self.args.dry_run:
@@ -626,7 +636,6 @@ class Run:
                 await self.precommit(found)
                 await self.commit_mode()
             else:
-                await self.triggers()
                 await self.router.call(
                     "/attach/enforced", {"deployment_id": self.row["deployment_id"]}
                 )
@@ -695,16 +704,28 @@ async def attach(
     except Refused as e:
         for r in e.refusals:
             log(f"refusing: {r}")
-        mode = (
-            "enforced, attaching: rerun attach to resume"
-            if run.mode == "enforced"
-            else ("unchanged" if not run.mode else f"{run.mode}")
-        )
-        log(f"the cell stays {mode}")
+        log(mode_line(run.mode))
+        return 1
+    except Exception as e:  # noqa: BLE001 — a store that fails names itself; a rerun resumes
+        log(f"stopped ({type(e).__name__}: {e}); run it again")
+        log(mode_line(run.mode))
         return 1
     run.report["seconds"] = round(time.monotonic() - started, 1)
     print(json.dumps(run.report, indent=2, sort_keys=True, default=str))
     return code
+
+
+def mode_line(mode: str) -> str:
+    """What a stopped run left the cell's mode at, by what it last knew."""
+    if mode == "enforced":
+        return "the cell stays enforced and attaching: rerun attach to resume"
+    if mode == "unknown":
+        return (
+            "the mode commit's outcome is unknown: rerun attach, which resumes by the mode it reads"
+        )
+    if mode == "recording":
+        return "the cell stays recording"
+    return "the cell's state is unchanged"
 
 
 def cmd_attach(args: argparse.Namespace) -> int:
@@ -719,14 +740,7 @@ def cmd_attach(args: argparse.Namespace) -> int:
     from server.core.ch import statement_timeout
 
     async def _run(ch: Any) -> int:
-        try:
-            return await attach(ch, args, url)
-        except Exception as e:  # noqa: BLE001 — a store that fails names itself; a rerun resumes
-            print(
-                f"loom cell attach: stopped ({type(e).__name__}: {e}); run it again",
-                file=sys.stderr,
-            )
-            return 1
+        return await attach(ch, args, url)
 
     # Every ClickHouse statement, the connect included, may run as long as a scan may.
     with statement_timeout(args.scan_budget):

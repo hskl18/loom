@@ -222,12 +222,72 @@ async def test_settle_extends_once_for_a_process_first_seen_booting(clock: _Cloc
 
 
 @pytest.mark.asyncio
-async def test_wait_counts_only_its_own_pauses(clock: _Clock) -> None:
-    wait = apg.Wait(2, clock)
-    clock.now += 100  # a scan's time
-    assert await wait.pause() and await wait.pause()
-    assert not await wait.pause()
-    assert wait.spent == 2.0
+async def test_wait_is_wall_time_lock_tries_included_and_no_scan(clock: _Clock) -> None:
+    """Each mode-commit try waits its lock timeout before it times out: the tries and the
+    pauses between them end within --wait, and time outside the wait is never charged."""
+    asked: list[str] = []
+
+    def lock(sql: str, *_a: Any) -> str:
+        if "lock_timeout" in sql:
+            asked.append(sql)
+            clock.now += int(sql.split("'")[1].removesuffix("ms")) / 1000
+            raise _Timeout()
+        return "OK"
+
+    conn = FakeConn(
+        [
+            ("SET LOCAL lock_timeout", lambda *a: lock(conn.executed[-1])),
+            ("l.mode = 'ExclusiveLock'", []),
+        ]
+    )
+
+    async def nothing() -> None:
+        pass
+
+    async def ready() -> bool:
+        return True
+
+    wait = apg.Wait(4, clock)
+    clock.now += 100  # a scan before the wait
+    with pytest.raises(Refused, match="not taken within --wait"):
+        await apg.commit_enforced(conn, nothing, ready, wait, lambda _t: None)
+    assert clock.now - 100 <= 4 and wait.spent <= 4
+    # A 2 s try, a 1 s pause, then a try that waits only the second left.
+    assert [a.split("'")[1] for a in asked] == ["2000ms", "1000ms"]
+
+
+@pytest.mark.asyncio
+async def test_the_trigger_pass_refuses_at_once_a_table_it_cannot_alter(
+    monkeypatch: pytest.MonkeyPatch, clock: _Clock
+) -> None:
+    from server.core import cell_triggers
+
+    async def planned(_c: Any) -> list[str]:
+        return ["scope_generations"]
+
+    async def holders(_c: Any, _t: str) -> list[Any]:
+        return []
+
+    async def ensure_table(*_a: Any, **_kw: Any) -> str:
+        return "denied"
+
+    monkeypatch.setattr(cell_triggers, "planned_tables", planned)
+    monkeypatch.setattr(cell_triggers, "holders", holders)
+    monkeypatch.setattr(cell_triggers, "ensure_table", ensure_table)
+    conn = FakeConn([("deadlock_timeout", 1000)])
+    wait = apg.Wait(60, clock)
+    (refusal,) = await apg.ensure_triggers(conn, wait, lambda _t: None)
+    assert refusal.subject == "postgres loom.scope_generations"
+    assert "cannot alter it" in refusal.reason and wait.spent < 1
+
+    async def busy(*_a: Any, **_kw: Any) -> str:
+        clock.now += 0.1
+        return "busy"
+
+    monkeypatch.setattr(cell_triggers, "ensure_table", busy)
+    wait = apg.Wait(3, clock)
+    (refusal,) = await apg.ensure_triggers(conn, wait, lambda _t: None)
+    assert "not taken within --wait" in refusal.reason and wait.spent <= 3
 
 
 # -- the rescan's watch ----------------------------------------------------------------
@@ -272,9 +332,9 @@ def test_the_watch_refuses_up_front_with_a_very_long_heartbeat(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(settings, "instance_heartbeat_seconds", 1180)
-    assert beats.Watch(None, "", "first").refusals_up_front()
+    assert beats.prune_window_refusals()
     monkeypatch.setattr(settings, "instance_heartbeat_seconds", 10)
-    assert beats.Watch(None, "", "first").refusals_up_front() == []
+    assert beats.prune_window_refusals() == []
 
 
 # -- batches, ordering, arguments --------------------------------------------------------
@@ -491,10 +551,19 @@ async def test_own_role_lacks_and_prepared_transactions_refuse() -> None:
             ("max_prepared_transactions", 5),
         ]
     )
-    refusals = await apg.own_role_refusals(conn, ["loom.memory_current", "loom.tenancy"])
+    tables = [
+        {"relname": "memory_current", "relkind": "r", "owned": True},
+        # Its grants are held, but not its owner role's membership: the trigger pass could
+        # not alter it, so it refuses before any write.
+        {"relname": "scope_generations", "relkind": "r", "owned": False},
+        {"relname": "tenancy", "relkind": "r", "owned": True},
+    ]
+    refusals = await apg.own_role_refusals(conn, tables)
     assert [str(r) for r in refusals] == [
         "postgres role attacher: attach's role lacks membership in pg_read_all_stats",
         "postgres role attacher: attach's role lacks SELECT on loom.memory_current",
+        "postgres role attacher: attach's role lacks membership in the owner role of "
+        "loom.scope_generations",
         "postgres max_prepared_transactions: is 5: a prepared transaction outlives every "
         "session, so step 4 could not wait for it; set it to 0",
     ]
@@ -674,7 +743,7 @@ async def test_a_serving_row_is_done_only_once_the_cell_is_enforced(
     run = cell_attach.Run(None, _args(), None, lambda _t: None)  # type: ignore[arg-type]
     assert await run.done()
     state[0] = "recording"
-    with pytest.raises(Refused, match="run loom cell restore"):
+    with pytest.raises(Refused, match="attach lowers and repairs neither"):
         await run.done()
 
 
@@ -697,3 +766,38 @@ async def test_a_root_secret_change_during_attach_refuses_at_the_end(
         await run.final_checks(beats.Watch(None, "", "first"))
     run.begun_keys_fp = "after"
     await run.final_checks(beats.Watch(None, "", "first"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [Refused([Refusal("postgres", "cut")]), OSError("gone")])
+async def test_a_stop_between_a_landed_commit_and_the_durable_read_says_the_outcome_is_unknown(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], failure: Exception
+) -> None:
+    from contextlib import asynccontextmanager
+
+    from server.core import pg
+
+    @asynccontextmanager
+    async def dedicated(**_kw: Any) -> Any:
+        yield None
+
+    async def landed(*_a: Any) -> None:
+        pass  # the commit landed; its answer may not have
+
+    async def call(_self: Any, _path: str, _body: Any = None) -> dict[str, Any]:
+        return {"cell": "first"}
+
+    async def run(self: Any) -> int:
+        self.row = {"deployment_id": "dep-1"}
+        await self.commit_mode()
+        raise failure  # what stops the run before the durable read finishes
+
+    monkeypatch.setattr(pg, "dedicated", dedicated)
+    monkeypatch.setattr(apg, "commit_enforced", landed)
+    monkeypatch.setattr(cell_attach.Router, "call", call)
+    monkeypatch.setattr(cell_attach.Run, "run", run)
+    url = httpx.URL("http://127.0.0.1:7900")
+    assert await cell_attach.attach(None, _args(), url) == 1
+    err = capsys.readouterr().err
+    assert "the mode commit's outcome is unknown: rerun attach" in err
+    assert "stays recording" not in err

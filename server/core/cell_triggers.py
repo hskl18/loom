@@ -21,7 +21,7 @@ import asyncio
 import dataclasses
 import logging
 import re
-from typing import Any
+from typing import Any, Literal
 
 from server.core import cell, pg, readiness
 
@@ -91,6 +91,9 @@ WHERE l.relation = $1::regclass AND l.pid <> pg_backend_pid()
   AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
   AND l.mode NOT IN ('AccessShareLock', 'RowShareLock')
 """
+
+# What a table's DDL came to (`ensure_table`, `_run_ddl`).
+Applied = Literal["applied", "busy", "denied"]
 
 # pg_trigger.tgtype bits (src/include/catalog/pg_trigger.h).
 _ROW, _BEFORE, _INSERT, _UPDATE, _INSTEAD = 1, 2, 4, 16, 64
@@ -242,7 +245,12 @@ async def ensure(conn: Any) -> None:
 
 async def planned_tables(conn: Any) -> list[str]:
     """The tables `ensure_table` gives triggers: the guarded org tables and `loom.tenancy`."""
-    return [r["relname"] for r, _ in _planned(await conn.fetch(ORG_TABLES))]
+    return planned_names(await conn.fetch(ORG_TABLES))
+
+
+def planned_names(rows: list[Any]) -> list[str]:
+    """`planned_tables` from rows `ORG_TABLES` read."""
+    return [r["relname"] for r, _ in _planned(rows)]
 
 
 async def ensure_table(
@@ -252,14 +260,14 @@ async def ensure_table(
     recording_first: bool = False,
     lock_timeout: str = LOCK_TIMEOUT,
     attempts: int = LOCK_ATTEMPTS,
-) -> bool:
+) -> Applied:
     """`ensure` for one table of the planned set (`loom.tenancy` its guard, any other its
     org triggers), so one table's DDL can run alone: in `enforced`, or with
     `recording_first` also in a first cell's `recording`, where the org triggers' function
-    passes every row and a boot never creates them. False when the DDL was not applied (its
-    lock not taken in `attempts` tries of `lock_timeout`, a table this role cannot alter);
-    True when it was, or nothing was needed. Raises for a table outside the planned set, or
-    in another state."""
+    passes every row and a boot never creates them. `applied` when the DDL ran or nothing
+    was needed, `busy` when its lock was not taken in `attempts` tries of `lock_timeout`,
+    `denied` when this role cannot alter the table. Raises for a table outside the planned
+    set, or in another state."""
     state = await cell.read_state(conn)
     if state != "enforced" and not (recording_first and state == "recording"):
         raise RuntimeError(f"cell triggers: not created in state {state!r}")
@@ -270,7 +278,9 @@ async def ensure_table(
         raise ValueError(f"loom.{table} carries no cell triggers")
     ((_, names),) = planned
     sqls = _table_statements(table, names, await _triggers(conn, names))
-    return not sqls or await _run_ddl(conn, table, sqls, lock_timeout, attempts)
+    if not sqls:
+        return "applied"
+    return await _run_ddl(conn, table, sqls, lock_timeout, attempts)
 
 
 def _table_statements(
@@ -293,10 +303,11 @@ async def _run_ddl(
     sqls: list[str],
     lock_timeout: str = LOCK_TIMEOUT,
     attempts: int = LOCK_ATTEMPTS,
-) -> bool:
-    """A table's DDL in one transaction, LOCK_ATTEMPTS short tries; whether it applied. The
-    boot serves past the two causes cells.md names (its lock not taken, a table this role
-    cannot alter); any other error fails it, as a failed read of the state does."""
+) -> Applied:
+    """A table's DDL in one transaction, `attempts` short tries: `applied`, or which of the
+    two causes cells.md names kept it from applying (`busy`: its lock not taken; `denied`:
+    a table this role cannot alter), which a boot serves past; any other error fails it, as
+    a failed read of the state does."""
     import asyncpg
 
     for attempt in range(attempts):
@@ -305,12 +316,12 @@ async def _run_ddl(
                 await conn.execute(f"SET LOCAL lock_timeout = '{lock_timeout}'")
                 for sql in sqls:
                     await conn.execute(sql)
-            return True
+            return "applied"
         except asyncpg.exceptions.InsufficientPrivilegeError as e:
             log.warning(
                 "cell triggers: not applied on loom.%s (%s): this role cannot alter it", table, e
             )
-            return False
+            return "denied"
         except asyncpg.exceptions.LockNotAvailableError as e:
             # Short tries outlast a short transaction; an autovacuum is left to finish.
             if attempt < attempts - 1:
@@ -323,7 +334,7 @@ async def _run_ddl(
                 "; ".join(sqls),
                 await _holders(conn, table),
             )
-    return False
+    return "busy"
 
 
 async def holders(conn: Any, table: str) -> list[Any]:

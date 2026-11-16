@@ -209,6 +209,16 @@ async def settle(
     """Read and judge until nothing is waited on: Refused at the first refusal, and once
     `wait` runs out naming what was waited on. With `extend_s`, the deadline is extended
     once, to `extend_s` past the first sight of the last process first seen booting."""
+    with wait.counting():
+        return await _settle(read, judge_beats, wait, extend_s)
+
+
+async def _settle(
+    read: Callable[[], Awaitable[list[Beat]]],
+    judge_beats: Callable[[list[Beat]], Verdict],
+    wait: Wait,
+    extend_s: float,
+) -> Verdict:
     first_seen: dict[str, float] = {}
     extended = False
     while True:
@@ -220,7 +230,7 @@ async def settle(
                 raise Refused(refusals)
             return verdict
         for i in verdict.booting:
-            first_seen.setdefault(i, wait.spent)
+            first_seen.setdefault(i, wait.used())
         if await wait.pause():
             continue
         if extend_s and not extended and verdict.booting:
@@ -249,6 +259,20 @@ def watch_period_s() -> float:
     return instances.PRUNE_AFTER_S - widened_window_s() - _SKEW_S
 
 
+def prune_window_refusals() -> list[Refusal]:
+    """A heartbeat interval so long that the leader may sweep a stopped process's rows
+    before step 4's watch reads them refuses before any write."""
+    if watch_period_s() < 2 * _READ_TIMEOUT_S:
+        return [
+            Refusal(
+                "LOOM_INSTANCE_HEARTBEAT_SECONDS",
+                "so long that a stopped process's rows can be swept before attach reads "
+                "them: lower it",
+            )
+        ]
+    return []
+
+
 class Watch:
     """The processes seen during step 4's rescan, read every `T' / 2` from the rescan's
     start (`since`), so a process with `LOOM_CELL` unset that ran during it is refused at
@@ -264,17 +288,6 @@ class Watch:
         self.no_cell: dict[str, str] = {}
         self.gap = False
         self._good = clock()
-
-    def refusals_up_front(self) -> list[Refusal]:
-        if watch_period_s() < 2 * _READ_TIMEOUT_S:
-            return [
-                Refusal(
-                    "LOOM_INSTANCE_HEARTBEAT_SECONDS",
-                    "so long that a stopped process's rows can be swept before attach reads "
-                    "them: lower it",
-                )
-            ]
-        return []
 
     async def read_once(self) -> list[Beat]:
         try:

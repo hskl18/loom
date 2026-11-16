@@ -633,3 +633,38 @@ async def test_doctor_names_stray_orgs_smallest_tables_first(cell_stores) -> Non
     assert grade == "WARN" and tag + "stray" in detail and tag + "held" not in detail
     tight = {n: (g, d) for n, g, d in await doctor_cell._stray_reads(stores["ch"], 0.001)}
     assert tight["cell_stray_orgs_unchecked"][0] == "WARN"
+
+
+@pytest.mark.asyncio
+async def test_a_role_with_the_grants_but_not_the_owner_role_is_refused_before_any_write(
+    cell_stores,
+) -> None:
+    from server.core import cell_triggers
+
+    await _prepare(cell_stores, _Network())
+    role = f"it_o_{uuid.uuid4().hex[:6]}"
+    await _admin(f"CREATE ROLE {role} LOGIN")
+    try:
+        async with pg.dedicated() as conn:
+            await conn.execute(f"GRANT USAGE ON SCHEMA loom TO {role}")
+            await conn.execute(
+                f"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA loom TO {role}"
+            )
+            await conn.execute(f"SET ROLE {role}")
+            rows = list(await conn.fetch(cell_triggers.ORG_TABLES))
+            refusals = await cell_attach_pg.own_role_refusals(conn, rows)
+            lacking = [r.reason for r in refusals if "owner role" in r.reason]
+            assert "attach's role lacks membership in the owner role of loom.tenancy" in lacking
+            assert any("loom.scope_generations" in r for r in lacking)
+            # The trigger pass tells the cause apart: denied, not a busy lock.
+            assert (
+                await cell_triggers.ensure_table(conn, "scope_generations", recording_first=True)
+                == "denied"
+            )
+            await conn.execute("RESET ROLE")
+            assert await _mode() == "recording"
+    finally:
+        async with pg.dedicated() as conn:
+            await conn.execute(f"DROP OWNED BY {role}")
+        await _admin(f"DROP OWNED BY {role}")
+        await _admin(f"DROP ROLE {role}")
