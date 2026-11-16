@@ -32,6 +32,7 @@ from server.memory.app.ask.pool import (
     _settle_window,
     _tag_belt,
     _widen_by_question,
+    governed_first,
 )
 from server.memory.app.ask.reader import _answer_chars, _AskReader, _check_premise
 from server.memory.app.ask.result import (
@@ -271,6 +272,9 @@ async def _fill_pool(
     # The hard tag belt and the authority's check, after the last leg that adds a row.
     run.ranked = await _tag_belt(run.ranked, run.search_input)
     run.ranked = await _served_pool(run.ranked, run.search_input)
+    # The reranks and injections above order by recency and identifiers: a governed
+    # definition any of the searches served leads again.
+    run.ranked = governed_first(run.ranked)
     run.results = run.ranked[: run.target_k]
     run.synth_pool = run.ranked[: run.window]
     return notes

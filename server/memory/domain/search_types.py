@@ -425,3 +425,23 @@ def hit_sort_key(h: Any) -> tuple[float, float, str, str, str, str, str]:
         row.user_id,
         row.session_id,
     )
+
+
+def is_computed_row(hit: Any) -> bool:
+    """Whether a hit is a computed row (a date difference or a derived aggregate), which
+    leads the served list: for a search hit or a wire hit dict alike."""
+    get = hit.get if isinstance(hit, dict) else lambda k: getattr(hit, k, "")
+    return get("source") == "computed" or get("memory_key") == "derived_aggregate"
+
+
+def governed_after_computed(rows: list[Any]) -> list[Any]:
+    """`rows` reordered so the governed definitions follow the computed rows and lead the
+    rest, each group in its order: for search hits or wire hit dicts alike."""
+
+    def governed(h: Any) -> bool:
+        return bool(h.get("governed") if isinstance(h, dict) else getattr(h, "governed", None))
+
+    computed = [h for h in rows if is_computed_row(h)]
+    lead = [h for h in rows if governed(h) and not is_computed_row(h)]
+    rest = [h for h in rows if not governed(h) and not is_computed_row(h)]
+    return computed + lead + rest

@@ -671,8 +671,11 @@ async def _ground_and_cut(run: _AskRun, window_rel_floor: float | None) -> None:
     if rel_floor > 0:
         from server.memory.domain.relevance_gate import similarity_floor_cut
 
+        # A governed definition is not cut: its similarity says nothing about whether the
+        # admin's definition answers the question.
+        held = [m for m in run.synth_pool if getattr(m, "governed", None)]
         knee = similarity_floor_cut(
-            run.synth_pool,
+            [m for m in run.synth_pool if not getattr(m, "governed", None)],
             rel_floor=rel_floor,
             min_keep=int(_settings.memory_ask_relevance_gate_min_keep or 3),
         )
@@ -683,7 +686,7 @@ async def _ground_and_cut(run: _AskRun, window_rel_floor: float | None) -> None:
         if knee.dropped:
             _knee_ids = {id(m) for m in knee.dropped}
             run.ranked = [m for m in run.ranked if id(m) not in _knee_ids]
-            run.synth_pool = knee.kept
+            run.synth_pool = held + knee.kept
 
 
 async def _settle_window(run: _AskRun, *, token_budget: int | None) -> bool:
@@ -742,6 +745,14 @@ async def _settle_window(run: _AskRun, *, token_budget: int | None) -> bool:
         1 for m in run.memories if str(getattr(m, "source", "") or "") == "summary"
     )
     return record_note
+
+
+def governed_first(pool: list[Any]) -> list[Any]:
+    """`pool` with its governed definitions first (after a computed row), from whichever
+    search served them, in their order; a stage that dropped one decided so."""
+    from server.memory.domain.search_types import governed_after_computed
+
+    return governed_after_computed(pool)
 
 
 def _read_time(run: _AskRun) -> tuple[str, bool, Any]:

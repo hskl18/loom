@@ -625,7 +625,13 @@ async def _pack_memories(st: _PackState) -> None:
             if resource:
                 cite = f"{cite}#{resource}"
             row_of[cite] = hit_row(h, input.namespace)  # a chunk's parent
-            group = resource or f"{source}:{ns}"
+            # A governed definition is its own group, so the per-group cap never moves one
+            # below another row.
+            group = (
+                f"governed:{h.memory_key}"
+                if getattr(h, "governed", None)
+                else resource or f"{source}:{ns}"
+            )
             evidence.append(
                 EvidenceItem(
                     citation=cite,

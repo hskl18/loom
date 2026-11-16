@@ -4761,6 +4761,7 @@ export interface MemorySearchHit {
   distance: number;
   similarity: number;
   below_threshold?: boolean | null;
+  governed?: boolean | null;
   tags?: string[] | null;
   reinforcement_count?: number | null;
   used_count?: number | null;
@@ -6896,6 +6897,7 @@ export interface MemorySearchOutput {
   score_explanation?: string;
   retrieval_confidence?: number;
   retrieval_risk?: "low" | "medium" | "high" | "abstain";
+  term_leg?: "complete" | "empty" | "capped" | "timed_out" | "failed" | "off";
   route_agreement?: number;
   calibration_explanation?: string;
   fallback_rounds_used?: number;

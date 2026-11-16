@@ -373,6 +373,7 @@ def _build_search_output(
         retrieval_plan=search_plan.explain(),
         retrieval_cost_estimate=run.retrieval_cost_estimate,
         retrieval_work=_actual_work_payload(actual_work, search_budget, clock=_clock),
+        term_leg=ctx.term_leg_status,
     )
     if getattr(input, "render", "") == "reader":
         from server.memory.app.ask.reader_render import reader_instructions, render_reader_block
@@ -484,6 +485,10 @@ def _record_gap_miss(input: MemorySearchInput, output: MemorySearchOutput) -> No
     if not settings.knowledge_gaps_enabled:
         return
     if not memory_missed(output.abstain, output.retrieval_risk) or output.namespaces_skipped:
+        return
+    # A governed definition answers the query, and a leg that did not report complete or
+    # empty (off included) may have held one.
+    if output.term_leg not in ("complete", "empty") or any(h.governed for h in output.results):
         return
     if unsettled(
         degraded=output.degraded,

@@ -64,8 +64,10 @@ def evidence_order(memories: list[Any], intent: Any, question: str = "") -> tupl
         d = _recorded_date(m)
         return d if d != "undated" else ("9999" if mode == "chronological" else "0000")
 
-    ordered = sorted(memories, key=_key, reverse=(mode == "reverse_chronological"))
-    return ordered, mode
+    # A governed definition is the admin's answer for its term: it leads, whatever its date.
+    governed = [m for m in memories if getattr(m, "governed", None)]
+    rest = [m for m in memories if not getattr(m, "governed", None)]
+    return governed + sorted(rest, key=_key, reverse=(mode == "reverse_chronological")), mode
 
 
 def elision_note(omitted: list[Any], *, max_keys: int = 8) -> str:
