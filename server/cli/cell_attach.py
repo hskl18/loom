@@ -1,6 +1,6 @@
 """`loom cell attach`: turn a prepared first cell into a `serving` one
 (docs/architecture/cells.md, "Attaching a cell"; the runbook is
-docs/operations/cells.md).
+docs/operations/cell-attach.md).
 
 A run holds the attach lock on a direct session of the cell's Postgres for its life, and
 goes, each step idempotent, so a rerun resumes by the directory row and the cell's mode:
@@ -121,7 +121,7 @@ def _too_long(found: cell_scan.ScanResult) -> list[Refusal]:
         Refusal(
             f"org of {len(org.encode())} bytes ({org[:64]}…)",
             f"found in {', '.join(sorted(sources))}: longer than {cell.ORG_MAX_BYTES} bytes; "
-            "remove it first (docs/operations/cells.md, the over-long org procedure)",
+            "remove it first (docs/operations/cell-attach.md, the over-long org procedure)",
         )
         for org, sources in sorted(found.too_long.items())
     ]
@@ -174,7 +174,8 @@ class Run:
         self.row: dict[str, Any] = {}
         self.mode = ""
         self.own_fp: tuple[dict[str, Any] | None, dict[str, Any] | None] = (None, None)
-        self.keys_fp = ""
+        self.keys_fp = ""  # the live processes' one root-secret fingerprint, last read
+        self.begun_keys_fp = ""  # the one this run's `attach/begin` wrote
         self.report: dict[str, Any] = {"cell": self.name}
 
     # -- the lock session --------------------------------------------------------------
@@ -410,6 +411,7 @@ class Run:
         try:
             await _write_nonces(self.ch, nonces)
             self.row = {**self.row, **await self.router.call("/attach/begin", body)}
+            self.begun_keys_fp = self.keys_fp
         finally:
             await _delete_nonces(self.ch, nonces)
 
@@ -523,7 +525,7 @@ class Run:
         verdict = await beats.settle(
             _read, self.judge_beats("refuse"), floor, extend_s=instances.boot_allowance_s()
         )
-        if verdict.keys_fps != {self.keys_fp}:
+        if verdict.keys_fps != {self.begun_keys_fp}:
             raise _refused(
                 "processes",
                 "the root-secret fingerprint changed during attach (a root-secret rotation): "

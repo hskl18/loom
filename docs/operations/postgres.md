@@ -44,6 +44,10 @@ pooler refuses or drops (its org triggers then refuse Loom's own writes for an o
 cell holds no row for, and the `loom.tenancy` guard its tenancy row for each newly placed
 org), and `loom doctor` names a session that lost it. Scripts and bulk loaders never set
 `session_replication_role = replica` on a cell: it skips the org triggers and the guard.
+No role is granted `SET` or `ALTER SYSTEM` on `session_replication_role`, `ALTER SYSTEM`
+on `loom.tenancy_checked`, or membership in `pg_write_server_files` or
+`pg_execute_server_program` on a cell: `loom cell attach` refuses such a role, and
+`loom doctor` warns on one ([attaching the first cell](cell-attach.md)).
 
 Every replica of the deployment, and its worker process, sets the same values. The full
 list, with the admission and delivery settings, is in the

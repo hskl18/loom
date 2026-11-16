@@ -11213,6 +11213,9 @@
         "json",
         "client",
         "server_url",
+        "pg_allow_role",
+        "stray_orgs",
+        "stray_orgs_budget",
         "token"
        ]
       }
@@ -11278,6 +11281,51 @@
        "type": null,
        "required": false,
        "help": "Override the client's server URL.",
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--pg-allow-role"
+       ],
+       "dest": "pg_allow_role",
+       "action": "_AppendAction",
+       "default": [],
+       "const": null,
+       "choices": null,
+       "nargs": null,
+       "type": null,
+       "required": false,
+       "help": "On a cell: a Postgres role that may make an org held (the servers' role).",
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--stray-orgs"
+       ],
+       "dest": "stray_orgs",
+       "action": "_StoreTrueAction",
+       "default": false,
+       "const": true,
+       "choices": null,
+       "nargs": 0,
+       "type": null,
+       "required": false,
+       "help": "On a cell: also read the orgs its stores hold without a tenancy row.",
+       "metavar": null
+      },
+      {
+       "option_strings": [
+        "--stray-orgs-budget"
+       ],
+       "dest": "stray_orgs_budget",
+       "action": "_StoreAction",
+       "default": 60.0,
+       "const": null,
+       "choices": null,
+       "nargs": null,
+       "type": "builtins:float",
+       "required": false,
+       "help": "Seconds --stray-orgs may read for, smallest tables first (default 60).",
        "metavar": null
       },
       {
@@ -12903,6 +12951,211 @@
            "metavar": null
           }
          ]
+        },
+        "attach": {
+         "prog": "loom cell attach",
+         "usage": null,
+         "description": null,
+         "epilog": null,
+         "formatter_class": "argparse:HelpFormatter",
+         "add_help": true,
+         "allow_abbrev": true,
+         "defaults": {
+          "func": "server.cli.cell_attach:cmd_attach"
+         },
+         "groups": [
+          {
+           "title": "positional arguments",
+           "description": null,
+           "dests": []
+          },
+          {
+           "title": "options",
+           "description": null,
+           "dests": [
+            "help",
+            "cell",
+            "wait",
+            "scan_budget",
+            "dry_run",
+            "ch_allow_user",
+            "ch_allow_user_directory",
+            "ch_allow_object",
+            "ch_allow_replica",
+            "pg_allow_role",
+            "router"
+           ]
+          }
+         ],
+         "mutually_exclusive": [],
+         "arguments": [
+          {
+           "option_strings": [
+            "-h",
+            "--help"
+           ],
+           "dest": "help",
+           "action": "_HelpAction",
+           "default": "==SUPPRESS==",
+           "const": null,
+           "choices": null,
+           "nargs": 0,
+           "type": null,
+           "required": false,
+           "help": "show this help message and exit",
+           "metavar": null
+          },
+          {
+           "option_strings": [
+            "--cell"
+           ],
+           "dest": "cell",
+           "action": "_StoreAction",
+           "default": null,
+           "const": null,
+           "choices": null,
+           "nargs": null,
+           "type": null,
+           "required": true,
+           "help": "This cell's name (LOOM_CELL)",
+           "metavar": null
+          },
+          {
+           "option_strings": [
+            "--wait"
+           ],
+           "dest": "wait",
+           "action": "_StoreAction",
+           "default": 600,
+           "const": null,
+           "choices": null,
+           "nargs": null,
+           "type": "builtins:int",
+           "required": false,
+           "help": "Seconds the waits share",
+           "metavar": null
+          },
+          {
+           "option_strings": [
+            "--scan-budget"
+           ],
+           "dest": "scan_budget",
+           "action": "_StoreAction",
+           "default": 7200,
+           "const": null,
+           "choices": null,
+           "nargs": null,
+           "type": "builtins:int",
+           "required": false,
+           "help": "Seconds one full org scan may take",
+           "metavar": null
+          },
+          {
+           "option_strings": [
+            "--dry-run"
+           ],
+           "dest": "dry_run",
+           "action": "_StoreTrueAction",
+           "default": false,
+           "const": true,
+           "choices": null,
+           "nargs": 0,
+           "type": null,
+           "required": false,
+           "help": "Run the refusals and the scan and print what would be placed; write nothing (the router's own begin refusals do not run)",
+           "metavar": null
+          },
+          {
+           "option_strings": [
+            "--ch-allow-user"
+           ],
+           "dest": "ch_allow_user",
+           "action": "_AppendAction",
+           "default": [],
+           "const": null,
+           "choices": null,
+           "nargs": null,
+           "type": null,
+           "required": false,
+           "help": "A ClickHouse user that may write the configured databases",
+           "metavar": null
+          },
+          {
+           "option_strings": [
+            "--ch-allow-user-directory"
+           ],
+           "dest": "ch_allow_user_directory",
+           "action": "_AppendAction",
+           "default": [],
+           "const": null,
+           "choices": null,
+           "nargs": null,
+           "type": null,
+           "required": false,
+           "help": "A ClickHouse user directory the check cannot read",
+           "metavar": null
+          },
+          {
+           "option_strings": [
+            "--ch-allow-object"
+           ],
+           "dest": "ch_allow_object",
+           "action": "_AppendAction",
+           "default": [],
+           "const": null,
+           "choices": null,
+           "nargs": null,
+           "type": null,
+           "required": false,
+           "help": "A ClickHouse object (db.name) that writes the databases",
+           "metavar": null
+          },
+          {
+           "option_strings": [
+            "--ch-allow-replica"
+           ],
+           "dest": "ch_allow_replica",
+           "action": "_AppendAction",
+           "default": [],
+           "const": null,
+           "choices": null,
+           "nargs": null,
+           "type": null,
+           "required": false,
+           "help": "A replica outside the cluster (db.table:replica)",
+           "metavar": null
+          },
+          {
+           "option_strings": [
+            "--pg-allow-role"
+           ],
+           "dest": "pg_allow_role",
+           "action": "_AppendAction",
+           "default": [],
+           "const": null,
+           "choices": null,
+           "nargs": null,
+           "type": null,
+           "required": false,
+           "help": "A Postgres role that may make an org held (the servers' role)",
+           "metavar": null
+          },
+          {
+           "option_strings": [
+            "--router"
+           ],
+           "dest": "router",
+           "action": "_StoreAction",
+           "default": null,
+           "const": null,
+           "choices": null,
+           "nargs": null,
+           "type": null,
+           "required": false,
+           "help": "The router's URL (default: LOOM_CELL_ROUTER_URL)",
+           "metavar": null
+          }
+         ]
         }
        },
        "aliases_of": {
@@ -12910,7 +13163,8 @@
         "limit": "loom cell limit",
         "which": "loom cell which",
         "remove": "loom cell remove",
-        "prepare": "loom cell prepare"
+        "prepare": "loom cell prepare",
+        "attach": "loom cell attach"
        },
        "choices_help": [
         {
@@ -12937,6 +13191,11 @@
          "dest": "prepare",
          "help": "Register this cell in the router's directory and write its rows.",
          "metavar": "prepare"
+        },
+        {
+         "dest": "attach",
+         "help": "Attach the prepared first cell: place its orgs, serve.",
+         "metavar": "attach"
         }
        ]
       }

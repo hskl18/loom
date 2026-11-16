@@ -320,6 +320,14 @@ checkout.
     answers them from one read per replica per `LOOM_ROUTER_DIRECTORY_CACHE_S`
     ([cells](../architecture/cells.md#the-heartbeats-keys)).
 
+18. Before a first cell's attach, once `LOOM_CELL` is set on every process and every CLI and
+    CI configuration of the cell (step 16), rotate the ClickHouse credential they write
+    with: a new user or password for the cell's servers and CLIs, the old one dropped. No
+    CLI sends a heartbeat, so attach cannot see a job still configured with `LOOM_CELL`
+    unset; the rotation cuts off any the rollout missed before it can write an org's rows
+    past attach's last scan. Name the new user with `--ch-allow-user`
+    ([attaching the first cell](./cell-attach.md)).
+
 While a migration applies, the old build keeps serving: every migration is additive.
 The rules that let the two builds serve side by side are in
 [rolling upgrades](../architecture/rolling-upgrades.md).

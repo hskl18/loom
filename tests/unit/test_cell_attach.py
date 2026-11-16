@@ -680,3 +680,20 @@ async def test_a_serving_row_is_done_only_once_the_cell_is_enforced(
 
 def test_refusal_text() -> None:
     assert str(Refusal("a", "b")) == "a: b"
+
+
+@pytest.mark.asyncio
+async def test_a_root_secret_change_during_attach_refuses_at_the_end(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = cell_attach.Run(None, _args(), None, lambda _t: None)  # type: ignore[arg-type]
+    run.begun_keys_fp = "before"
+
+    async def settle(*_a: Any, **_kw: Any) -> beats.Verdict:
+        return beats.Verdict(live=1, keys_fps={"after"})
+
+    monkeypatch.setattr(beats, "settle", settle)
+    with pytest.raises(Refused, match="a root-secret rotation"):
+        await run.final_checks(beats.Watch(None, "", "first"))
+    run.begun_keys_fp = "after"
+    await run.final_checks(beats.Watch(None, "", "first"))

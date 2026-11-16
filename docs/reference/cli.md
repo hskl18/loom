@@ -315,7 +315,7 @@ python scripts/codegen/docs_reference.py
 | `loom bot create` | Register a bot: its namespaces, and a key (--generate-key or --public-key) and/or a CI trust (--issuer, --audience, --claim). | `--name`, `--org`, `--namespace-role`, `--generate-key`, `--public-key`, `--issuer`, `--audience`, `--claim`, `--jwks-uri`, `--max-token-age`, `--max-access-token-ttl`, `--max-agents`, `--agent-claim`, `--platform-admin`, `--replace` |
 | `loom bot list` | Every bot, active or disabled. |  |
 | `loom bot disable` | Refuse its proofs and revoke the tokens it holds. | `--name` |
-| `loom doctor` | Diagnose pre-boot misconfig (Python version, settings, JWT, CH reachability) and print the problem list /v1/health carries, each with its fix. | `--json`, `--client`, `--server-url`, `--token` |
+| `loom doctor` | Diagnose pre-boot misconfig (Python version, settings, JWT, CH reachability) and print the problem list /v1/health carries, each with its fix. | `--json`, `--client`, `--server-url`, `--pg-allow-role`, `--stray-orgs`, `--stray-orgs-budget`, `--token` |
 | `loom report` | Print the bug form's Environment field: versions and the `loom doctor` checks. | `--open` |
 | `loom drops` | Print the memory ingest drop ledger (loom.memory_drops) for a namespace, by stage/reason — what the pipeline discarded, truncated or gave up on. | `--namespace`, `--org`, `--hours` |
 | `loom namespaces-gc` | List (default) or erase throwaway namespaces — finished bench runs under the bench prefixes that nobody registered and nobody has written to for --idle-hours — in one list-scoped erasure saga per… | `--org`, `--prefix`, `--namespace`, `--exclude-prefix`, `--idle-hours`, `--include-registered`, `--erase`, `--no-purge`, `--skip-external`, `--batch`, `--show`, `--requester`, `--worker-pass` |
@@ -330,6 +330,7 @@ python scripts/codegen/docs_reference.py
 | `loom cell which` | Print the lookup's cell and host for an org (the first cell if not placed). | `--org`, `--router` |
 | `loom cell remove` | Remove the directory row of a cell attaching with no placement. | `--cell`, `--router` |
 | `loom cell prepare` | Register this cell in the router's directory and write its rows. | `--cell`, `--host`, `--credential-sha256`, `--probe-url`, `--wait`, `--router` |
+| `loom cell attach` | Attach the prepared first cell: place its orgs, serve. | `--cell`, `--wait`, `--scan-budget`, `--dry-run`, `--ch-allow-user`, `--ch-allow-user-directory`, `--ch-allow-object`, `--ch-allow-replica`, `--pg-allow-role`, `--router` |
 | `loom tracker-probe` | Read-only first contact with the tracker source: counts and newest timestamps per upstream table per credential, breaker states, the configured tracker namespaces. |  |
 | `loom tracker-contract-check` | Read-only: does each tracker source's schema meet the record contract (docs/features/tracker/record-contract.md)? | `--source`, `--namespace`, `--json` |
 | `loom tracker-dupcheck-fit` | Refit tracker.duplicate_check's calibrated confidence for one tracker namespace now: replays the duplicate gold at filing time, fits, stores the fit. | `--namespace`, `--org`, `--negatives`, `--dry-run`, `--out` |

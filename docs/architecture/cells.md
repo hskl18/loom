@@ -389,7 +389,8 @@ open meanwhile, as on a deployment never prepared, since the cell's Postgres, wh
 holds its state, cannot tell the two apart (ClickHouse carries no cell state: adding it
 would make the write path read a second store for tenancy) and such a process never
 reads the directory; where every process has `LOOM_CELL` unset, `loom doctor`'s naming
-of it (which reads the directory, and ships with attach) is the only signal. A
+of it (which reads the directory, and ships with the router's read-only scope) is the only
+signal. A
 `(true, …)` row with `recording` and the own row: the first cell recording. Both present
 with the own row otherwise: `enforced`, a later cell's mode reading as `enforced`
 whatever its row says (its triggers, mode cache and CLI treat it so, and
@@ -676,20 +677,18 @@ inserts cannot hold the write off, a new-org request waits on attach for a few s
 at most, and an attach that stalls holding the write's lock releases it within seconds.
 Attach takes `LOCK TABLE loom.tenancy_mode IN EXCLUSIVE MODE` (which waits for running
 inserts and queues later ones behind it) in short tries, in one transaction with
-server-side timeouts, then writes the mode and commits; after any error in that
-transaction it ends that session's backend (`pg_terminate_backend`, the backend named by
-the pid and `backend_start` attach captured when it connected) and waits until it has
-left `pg_stat_activity`, then reads the mode back before it retries or reports; a mode
-read back as `enforced` is written again in a fresh transaction, whose commit waits for
-the standby, before attach goes on, since a commit ended while it waited is on the
-primary alone. The attach command fixes those timeouts, and its tests cover each of
-these cases. The mode cache reads the mode with a plain `SELECT`, which takes no row
-lock and never waits on attach. An insert that finds `enforced` (a process whose cache
+server-side timeouts, then writes the mode and commits; after a failed try it ends the
+mode transaction still in flight, found by its `ExclusiveLock` on `loom.tenancy_mode` in
+this database (a pid captured at connect is wrong behind a connection path that swaps
+backends), and waits until the lock clears. Whether the commit landed is decided by a
+durable read of the mode, whose commit waits for the standby, since a commit ended while
+it waited is on the primary alone ([attaching a cell](#attaching-a-cell), steps 6 and 7).
+The mode cache reads the mode with a plain `SELECT`, which takes no row lock and never
+waits on attach. An insert that finds `enforced` (a process whose cache
 still reads `recording`) writes nothing: the request goes on to the placement call as in
-`enforced`, and a CLI command refuses as in `enforced`, naming the org. A process whose
-cache still reads `enforced` after step 3 or step 4 returns the cell to `recording` places
-through the router's gate until its cache expires.
-`loom doctor` lists any tenancy row the directory does not place.
+`enforced`, and a CLI command refuses as in `enforced`, naming the org. A first attach
+never lowers the mode once it commits `enforced`. `loom doctor`, with the router's
+read-only scope, lists any tenancy row the directory does not place.
 
 - **It runs after verification, before anything is written for the org.** The op gate
   (`gates.authorize`) checks the org the transport resolves (`gates.resolve_org`, with
@@ -983,51 +982,126 @@ refuses on any failure, naming it:
   revocation prefix, so a person the identity provider provisions later is admitted,
   since it will never deprovision a person it does not count as assigned.
 
-The first attach turns the existing deployment into the first cell, in order:
+The first attach (`loom cell attach`, its procedure on
+[attaching the first cell](../operations/cell-attach.md)) turns the existing deployment
+into the first cell. It aliases nothing (an `oauth_issuer_host` on another host refuses at
+`attach/begin`), and refuses with SCIM on until per-cell SCIM ships. A run holds an
+advisory lock, `cell.ATTACH_LOCK_KEY`, on a session of its own for its life (prepare and
+`loom cell update` take the same lock), after checking that the session is one direct
+backend that keeps the tenancy marker: a lock left on a pooler's server connection would
+refuse every later run, and attach's tenancy rows would be refused as an unchecked
+writer's. A lock found lost between steps is taken again (refusing when another run holds
+it), and the cell's state is read again. The lock does not make a run safe, since every
+step is idempotent and the mode only rises; it keeps a second run's scans from holding the
+snapshot horizon that step 4 waits on.
 
-1. check the mode is `recording`, as prepare set it: every verified request has written
-   its org's tenancy row if absent while the directory answered that the cell is
-   `attaching`;
-2. in one directory transaction, write `attach_started_at`, the cell's issuers, patterns
-   and fingerprint (both values of `loom.cell_self`), and the placements, then the
-   tenancy rows, of every org the cell holds, from one snapshot, straight into the
-   directory (no other cell exists yet): its configured orgs (of both values), the
-   distinct `org` of every table of both schemas (generated from the schema, as
-   erasure's table classification is), and the orgs of catalogued bucket objects; never
-   `''`, `'-'` or `'*'`;
-3. set `enforced` as above, within `--wait`, which the wait below then shares, starting
-   no try that could commit the mode with less left than that wait's minimum (the mode
-   cache's lifetime plus the longest request deadline): attach then refuses, reporting
-   the mode it reads back (`recording`, and a rerun resumes from step 1), or the mode as
-   unknown when it cannot read it, and a rerun then resumes by the mode it reads; then
-   wait, within what remains of `--wait` (default 10 minutes, then refuse and set
-   `recording` back), until every live process reports `enforced` and then the mode
-   cache's lifetime plus the longest request deadline have passed; then run the SCIM
-   precondition again (`--revoke-unprovisioned` again if given), for accounts made
-   before `enforced` took hold; if it refuses, the cell stays `enforced` and
-   `attaching`, and running attach again resumes from the wait, as a resumed attach does
-   (below);
-4. wait, within what remains of `--wait`, until no transaction that could have read
-   `recording` is still open, judged from a Postgres snapshot attach takes once it has
-   read `enforced` back in this run (not from a clock): a transaction on the cell's
-   database that started before it, from any client, background worker or logical
-   replication connection, read-only ones included, a writing transaction on another
-   database of the same server that did (it holds back every snapshot's horizon, and is
-   named as such), a prepared transaction (which refuses at once), or one whose state
-   attach cannot read counts as open, and Postgres's own maintenance processes, physical
-   replication connections (every standby's and a base backup's, which run no SQL) and
-   attach's own connections do not. Past `--wait` attach refuses, naming what it waited
-   on, and leaves the cell `enforced`, so a rerun resumes from step 3's wait. The attach
-   command fixes the exact query, and its tests cover each kind of transaction. Once the
-   wait passes, place the tenancy rows written since the snapshot and every org step 2's
-   sources yield when read again (the distinct `org` of every table of both schemas and
-   the orgs of catalogued bucket objects; a row or an object an unchecked writer, such
-   as an older CLI or a worker, wrote in `recording` after the snapshot is placed too),
-   check again that every live process reports `enforced` (refusing and returning to
-   `recording` as step 3 does if one does not), and mark the cell `serving`. The
-   directory records the highest mode attach has raised or tried to raise, which
-   `loom cell restore` writes back only upward: a cell whose step 3 was refused at the
-   lock is restored `enforced`, and its resumed attach then runs from step 3's wait.
+It refuses, before any write, naming each:
+
+- stores other than the registered ones: the Postgres deployment id, ClickHouse's
+  `loom.storage_authority` and the shared host's `/v1/health/deployment` each name the
+  directory row's deployment id, `loom.cell_first` reads `(true, <cell>)`, the row is the
+  first cell's, `attaching`, with no other directory row;
+- a database encoding other than UTF8 (prepare refuses the same), so a tenancy row
+  within the length limit is always an org a request can name;
+- a synchronous standby not attached now, a durability profile that would not refuse
+  without one, or a role that may not write the durable read's logical message; a role
+  of attach's own lacking its grants (`pg_read_all_stats` among them) or a server with
+  `max_prepared_transactions` above 0;
+- **the tenancy-privilege check**: a login role, other than attach's own (superusers,
+  and a role that itself owns `loom.tenancy`, `loom.tenancy_mode` or a guarded table) and
+  those named with `--pg-allow-role`, that holds or reaches through any membership a right
+  to make an org held or lower the mode: `INSERT` on any column of `loom.tenancy` or
+  `UPDATE` of its `org`, `INSERT` on `loom.tenancy_mode` or `UPDATE` of its `mode`,
+  `TRIGGER` on a `loom` table, `CREATE` on the database or a schema that is not a system
+  one (a function there can shadow one the servers call unqualified on their marked
+  session), `SET` or `ALTER SYSTEM` on `session_replication_role`, `ALTER SYSTEM` on
+  `loom.tenancy_checked`, membership in `pg_write_server_files` or
+  `pg_execute_server_program`, or ownership of a `loom` table, of the trigger functions or
+  of `loom.cell_first_immutable()`, the database or a schema;
+- **the unmarked-session check**: a session that sends no marker reads one, or runs as
+  `replica`; a `pg_db_role_setting` entry of `loom.tenancy_checked` or
+  `session_replication_role` for this database or every one, matched case-insensitively;
+  any logical-replication subscription into this database, enabled or not (its apply
+  worker fires no origin trigger);
+- the heartbeats (both tables, stopped rows included for the widened window, the live
+  window plus a stopping pod's drain and retirement): a live process with `LOOM_CELL`
+  unset or another cell, one without the heartbeat's keys, `marked` false, `router` false
+  where `serves` is true, a fingerprint on neither `loom.cell_self` value, several
+  `keys_fp` values, or none live; a booting process (no cell row yet, no mode, `marked`
+  or `router` null) is waited on within `--wait`; in `recording` a stopped process with
+  `LOOM_CELL` unset refuses too;
+- the ClickHouse writer check and the scan's table list (`server/cli/cell_writers.py`,
+  `server/cli/cell_scan.py`), and a settings profile or quota that caps what attach's user
+  reads.
+
+Then, in order:
+
+1. `attach/begin`, on every run, before any long step: the router probes the stores
+   attach wrote its nonces to, checks the upstream, and writes the fingerprints and
+   `keys_fp`; a directory restored to before it is written again.
+2. Read the mode: `recording`, or `enforced` on a resume, which goes from the triggers,
+   through `attach/enforced` again, to the durable read.
+3. Create the triggers itself, on every run, before step 2's scan and again just before the
+   mode commit (so a table a migration added during the scan is guarded from the commit
+   on): one table at a time under the migration lock, each DDL waiting 100 ms for its lock
+   and retried a second apart within `--wait`; an autovacuum holding it gets one try just
+   past `deadlock_timeout`, so it yields, and an anti-wraparound vacuum is named. Then
+   `cell_triggers.missing`; any defect refuses. A refused attach in `recording` leaves the
+   triggers, which pass every row there.
+4. In `recording`, the scan: one statement per table, no long transaction (step 4 reads
+   every source again): the Postgres tables (`loom.tenancy` among them) by skip scans on an
+   `org`-led btree index, then the ClickHouse tables, each flushed and synced first, with
+   the configured orgs of both fingerprints. Log tables (`cell_scan.LOG_TABLES`) are not
+   read: a log row keeps the org a caller typed before any check, so placing a log-only
+   org would let anyone pin an org name to the cell; `loom doctor --stray-orgs` names such
+   orgs. An org longer than `cell.ORG_MAX_BYTES` refuses, naming it, before any tenancy row
+   is written; a name no request can carry is skipped and named. Then the tenancy rows of
+   the orgs found, on a marked session, and no placement: unscoped callers are answered
+   from the tenancy rows, and placing now would move the point of no return earlier.
+5. The pre-commit checks: the heartbeats, the tenancy-privilege and unmarked-session
+   checks and the standbys again, and the scan's elapsed time within half of
+   `--scan-budget`, since step 4 reads the same tables again. Each refuses in
+   `recording`, which can still be backed out.
+6. The mode commit: `attach/enforced`, then on a session of its own an EXCLUSIVE lock on
+   `loom.tenancy_mode`, 2 s a try within `--wait`, the attach lock confirmed and the
+   cheap heartbeat refusals run before each try (a booting process skips the try). After a
+   failed try, the mode transaction an earlier run left in flight is found by its lock
+   (only attach takes `ExclusiveLock` there; a relation's OID is matched in this database
+   alone) and ended. From the commit on the mode only rises: every later refusal leaves
+   the cell `enforced` and `attaching`, and a rerun resumes from the durable read.
+7. The durable read, in every run that reads `enforced`: the mode and the `first` row read
+   in a transaction that emits a transactional logical message, whose commit waits for
+   the synchronous standbys, with the standbys checked attached just before and after.
+   Then `X`, the snapshot's xmax, which must exceed that message's xid. A READ COMMITTED
+   writer that read `recording` holds an xid below `X`, and a REPEATABLE READ one a
+   snapshot older than `X`: the trigger functions are `VOLATILE`, and the message's xid is
+   assigned after the mode commit.
+8. The heartbeats again: a process with `LOOM_CELL` unset or another cell, without the
+   keys, unmarked, or with no router where it serves, refuses at once. No process depends
+   on its cached mode (a request records a new org through `tenancy._RECORD`, which reads
+   the mode `FOR SHARE`), so neither a cache lifetime nor a request deadline is waited out.
+9. Step 4: wait, within `--wait`, while any backend of the cell's database but the polling
+   one has an xid older than `X`, or any but an autovacuum a snapshot older than `X`
+   (compared through `age()`, exactly `< X` and wraparound-safe); past `--wait` attach
+   refuses, naming each, and each backend of another database holding the horizon. A
+   prepared transaction, or a row of the cell's database whose state is hidden, refuses
+   at once. Then the cheap checks (the writer check, `missing`, the Postgres checks, the
+   heartbeats with every stopped process with `LOOM_CELL` unset aged out, the standbys);
+   the rescan of every source in full, Postgres before ClickHouse (the outbox and delivery
+   tables move rows to ClickHouse), and the queue and drain tables and the tables a view
+   reads before the others (`cell_scan.MOVE_SOURCES`); the tenancy rows; the placements,
+   in `attach/place` batches; the writer check again; and the final checks, under a floor
+   of their own (the larger of what `--wait` left and `instances.boot_allowance_s()`):
+   the heartbeats, read through the rescan every half of the time the leader keeps a
+   stopped row (`instances.PRUNE_AFTER_S`), refusing any process that ran with `LOOM_CELL`
+   unset during it, `loom.cell_self` equal to the directory's fingerprints, one `keys_fp`
+   equal to the one `begin` wrote, the mode `enforced`; then `attach/serving`.
+
+`--wait` (default 10 minutes) is shared by the waits alone; `--scan-budget` (default 2
+hours) bounds each full scan. `--dry-run` runs the refusals and the scan, prints what would
+be placed and skipped and the scan's time, and writes nothing; the router's checks at
+`attach/begin` do not run. On a `serving` row attach reads the cell's mode: `enforced` is
+done (exit 0), anything else refuses, naming `loom cell restore`.
 
 A later cell is attached only once the first is `serving`. It must hold no org data
 (attach refuses otherwise) and starts in `enforced`. Its attach runs, in order: the
@@ -1046,13 +1120,18 @@ cell with SCIM on admits no one until its first provisioning cycle has run. A ce
 nearing its stores' limits is closed to new orgs: its placement calls answer 503, so its
 issuers' new orgs wait for capacity rather than spill elsewhere.
 
-A resumed first attach, for a cell whose directory row has `attach_started_at`, reruns
-every refusal of the list above that applies to the first cell. It then continues by the
-cell's mode: in `recording` from step 1; in `enforced`, from step 3's wait (every live
-process reports `enforced`, then the cache's lifetime and the longest request deadline
-pass) and then its SCIM precondition, so the SCIM check that ends an attach stopped
-after setting `enforced`, whatever stopped it, always runs after `enforced` has taken
-hold.
+A resumed first attach reruns every refusal and continues by the directory row and the
+cell's mode: in `recording` from the scan, in `enforced` from the durable read; whenever
+the cell reads `enforced` it posts `attach/enforced` again, so a directory restored below
+the cell's mode is raised.
+
+The checks of the stores' writers are point-in-time: a grant, a role setting, a
+subscription, a ClickHouse writer or object added after `serving` passes them, as does a
+configuration file attach cannot read (`postgresql.conf`, `postgresql.auto.conf`, a
+standby's own) or a role that runs code as the server's OS user. `loom doctor` runs the
+tenancy-privilege and unmarked-session reads again on every run and warns on what it finds
+(`cell_tenancy_privilege`, `cell_unchecked_writers`); the runbook has the operator confirm
+the rest.
 
 ## What each cell runs
 
@@ -1102,9 +1181,9 @@ closed: every cell keeps serving the orgs it holds, routing continues from each 
 replica's signed snapshot of its last cache (written to shared storage on every
 directory change), and the placements, lookups of uncached orgs, `loom cell` commands
 that read or write the directory and the recording cells' state reads answer 503 or
-refuse until the directory is back, while `loom doctor` reports its directory checks as
-not run and, with `LOOM_CELL` set, exits non-zero; rebuilding a lost directory from the
-cells is a design of its own.
+refuse until the directory is back, while `loom doctor`, with the router's read-only
+scope, reports its directory checks as not run and, with `LOOM_CELL` set, exits
+non-zero; rebuilding a lost directory from the cells is a design of its own.
 
 Each cell keeps, in its own Postgres, a copy of its directory row's configuration
 fingerprint (`loom.cell_self`), which its processes compare their configuration with and
@@ -1200,30 +1279,36 @@ the directory row.
 
 ## Failure modes
 
-| Failure                                                                  | What happens                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| The directory is down                                                    | requests by host, by issuer and to the first cell are routed; new orgs and uncached lookups answer 503                                                                                                                                                                                                                                                                                                                               |
-| The router's placement call fails                                        | the request answers 503 and nothing is written; orgs the cell holds are served                                                                                                                                                                                                                                                                                                                                                       |
-| A cell's issuer places orgs in a flood                                   | from `enforced` on, its placement calls answer 503 with `Retry-After` past its rate, and its calls for new orgs answer 503 past its quota if one is set; other cells place as before                                                                                                                                                                                                                                                 |
-| A SCIM token of another cell, or an application at the wrong cell's host | the process does not boot, or `/scim/v2` answers 401 and writes nothing                                                                                                                                                                                                                                                                                                                                                              |
-| A cell's Postgres or ClickHouse                                          | that cell fails as a single deployment does ([storage authority](storage-authority.md#failure)); other cells serve                                                                                                                                                                                                                                                                                                                   |
-| A cell's own rows or tenancy mode are unreadable                         | with `LOOM_CELL` set a process keeps its last rows and mode within the stale bound, then is gated, a server process whose first read fails does not boot (gated and unready with Postgres migrations pending), and a workers child that never read them is gated; with it unset a server process keeps its verdict with no bound, and a failed first read fails its boot (gated until a read lands with Postgres migrations pending) |
-| A `first` or mode row removed, or both beside a tenancy or own row       | the org triggers, where a cell has them, act as in `enforced` and every process is gated; `loom doctor` names it, a prepare rerun writes them back                                                                                                                                                                                                                                                                                   |
-| No state, tenancy or own row on a cell the directory registers           | open; `loom doctor` names it; `loom cell restore` closes it after a restore, a prepare rerun after a stopped prepare                                                                                                                                                                                                                                                                                                                 |
-| A cell's `first` value is not yet read                                   | every request but health probes and the probe route answers 503 (SCIM with `Retry-After`); the process is unready and runs no worker (a workers child, or a server process with Postgres migrations pending; any other server process fails its boot)                                                                                                                                                                                |
-| A request for another cell's org                                         | 409 `WRONG_CELL` after verification, nothing written                                                                                                                                                                                                                                                                                                                                                                                 |
-| A platform, `*`-org or principal-less call for an unheld org             | on a first cell, 503 while the directory answers `attaching` or cannot be read before a `serving` answer; 409 `WRONG_CELL` once `serving` and on a later cell                                                                                                                                                                                                                                                                        |
-| A pooler that strips the tenancy marker from a cell's sessions           | the `cell_marker` readiness check fails in `enforced` and `partial` and warns in `recording`; the heartbeat reports `marked` false and attach refuses the process                                                                                                                                                                                                                                                                    |
-| A cell restored to an earlier time                                       | `loom cell restore` writes placed orgs' rows back before it starts                                                                                                                                                                                                                                                                                                                                                                   |
-| A first cell restored to before its prepare, not yet attached            | at processes with `LOOM_CELL` set, every request but health probes and the probe route answers 503 until prepare reruns                                                                                                                                                                                                                                                                                                              |
-| The directory lost                                                       | every cell serves the orgs it holds; placements and uncached lookups answer 503, directory commands refuse, until it is back                                                                                                                                                                                                                                                                                                         |
-| A cell in `recording`, the directory unreadable                          | a new org answers 503; the orgs it holds keep serving                                                                                                                                                                                                                                                                                                                                                                                |
-| A process stuck during first attach                                      | the attach refuses after `--wait` and the cell returns to `recording`                                                                                                                                                                                                                                                                                                                                                                |
-| A recording insert held open during first attach                         | attach stops trying once too little of `--wait` is left for the wait, reporting the mode it reads back; a rerun resumes                                                                                                                                                                                                                                                                                                              |
-| Attach stalls while it holds the mode table's lock                       | Postgres ends its session within seconds and releases the lock; new orgs answer within their deadline                                                                                                                                                                                                                                                                                                                                |
-| A transaction open since before step 4's snapshot                        | attach refuses once `--wait` runs out (a prepared one at once), naming what it waited on, and leaves `enforced`                                                                                                                                                                                                                                                                                                                      |
-| A CLI command with `LOOM_CELL` unset, started before attach's step 3     | it read the state while the first cell was `recording` and keeps writing ClickHouse after `serving`; the runbook sets `LOOM_CELL` on every CLI before attach                                                                                                                                                                                                                                                                         |
-| A CLI of a build before the state read                                   | it is not refused on an `enforced` cell; every CLI and CI image runs a build with the read before attach ([upgrades](../operations/upgrades.md#upgrade-procedure))                                                                                                                                                                                                                                                                   |
+| Failure                                                                                                                                                                      | What happens                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| The directory is down                                                                                                                                                        | requests by host, by issuer and to the first cell are routed; new orgs and uncached lookups answer 503                                                                                                                                                                                                                                                                                                                               |
+| The router's placement call fails                                                                                                                                            | the request answers 503 and nothing is written; orgs the cell holds are served                                                                                                                                                                                                                                                                                                                                                       |
+| A cell's issuer places orgs in a flood                                                                                                                                       | from `enforced` on, its placement calls answer 503 with `Retry-After` past its rate, and its calls for new orgs answer 503 past its quota if one is set; other cells place as before                                                                                                                                                                                                                                                 |
+| A SCIM token of another cell, or an application at the wrong cell's host                                                                                                     | the process does not boot, or `/scim/v2` answers 401 and writes nothing                                                                                                                                                                                                                                                                                                                                                              |
+| A cell's Postgres or ClickHouse                                                                                                                                              | that cell fails as a single deployment does ([storage authority](storage-authority.md#failure)); other cells serve                                                                                                                                                                                                                                                                                                                   |
+| A cell's own rows or tenancy mode are unreadable                                                                                                                             | with `LOOM_CELL` set a process keeps its last rows and mode within the stale bound, then is gated, a server process whose first read fails does not boot (gated and unready with Postgres migrations pending), and a workers child that never read them is gated; with it unset a server process keeps its verdict with no bound, and a failed first read fails its boot (gated until a read lands with Postgres migrations pending) |
+| A `first` or mode row removed, or both beside a tenancy or own row                                                                                                           | the org triggers, where a cell has them, act as in `enforced` and every process is gated; `loom doctor` names it, a prepare rerun writes them back                                                                                                                                                                                                                                                                                   |
+| No state, tenancy or own row on a cell the directory registers                                                                                                               | open; `loom doctor` names it; `loom cell restore` closes it after a restore, a prepare rerun after a stopped prepare                                                                                                                                                                                                                                                                                                                 |
+| A cell's `first` value is not yet read                                                                                                                                       | every request but health probes and the probe route answers 503 (SCIM with `Retry-After`); the process is unready and runs no worker (a workers child, or a server process with Postgres migrations pending; any other server process fails its boot)                                                                                                                                                                                |
+| A request for another cell's org                                                                                                                                             | 409 `WRONG_CELL` after verification, nothing written                                                                                                                                                                                                                                                                                                                                                                                 |
+| A platform, `*`-org or principal-less call for an unheld org                                                                                                                 | on a first cell, 503 while the directory answers `attaching` or cannot be read before a `serving` answer; 409 `WRONG_CELL` once `serving` and on a later cell                                                                                                                                                                                                                                                                        |
+| A pooler that strips the tenancy marker from a cell's sessions                                                                                                               | the `cell_marker` readiness check fails in  `enforced` and `partial` and warns in `recording`; the heartbeat reports `marked` false and attach refuses the process                                                                                                                                                                                                                                                                   |
+| A cell restored to an earlier time                                                                                                                                           | `loom cell restore` writes placed orgs' rows back before it starts                                                                                                                                                                                                                                                                                                                                                                   |
+| A first cell restored to before its prepare, not yet attached                                                                                                                | at processes with `LOOM_CELL` set, every request but health probes and the probe route answers 503 until prepare reruns                                                                                                                                                                                                                                                                                                              |
+| The directory lost                                                                                                                                                           | every cell serves the orgs it holds; placements and uncached lookups answer 503, directory commands refuse, until it is back                                                                                                                                                                                                                                                                                                         |
+| A cell in `recording`, the directory unreadable                                                                                                                              | a new org answers 503; the orgs it holds keep serving                                                                                                                                                                                                                                                                                                                                                                                |
+| A process stuck during first attach                                                                                                                                          | the attach refuses after `--wait` and the cell returns to `recording`                                                                                                                                                                                                                                                                                                                                                                |
+| A recording insert held open during first attach                                                                                                                             | the mode commit's tries wait behind its `FOR SHARE` lock within `--wait`; past it attach refuses and the cell stays `recording`; a rerun resumes                                                                                                                                                                                                                                                                                     |
+| Attach stalls while it holds the mode table's lock                                                                                                                           | Postgres ends its session within seconds and releases the lock; new orgs answer within their deadline                                                                                                                                                                                                                                                                                                                                |
+| A transaction open since before step 4's snapshot                                                                                                                            | attach refuses once `--wait` runs out (a prepared one at once), naming what it waited on, and leaves `enforced`                                                                                                                                                                                                                                                                                                                      |
+| A CLI command with `LOOM_CELL` unset, started before attach's step 3                                                                                                         | it read the state while the first cell was `recording` and keeps writing ClickHouse after `serving`; the runbook sets `LOOM_CELL` on every CLI before attach, and `loom doctor --stray-orgs` names the orgs it left without a tenancy row                                                                                                                                                                                            |
+| A CLI of a build before the state read                                                                                                                                       | it is not refused on an `enforced` cell; every CLI and CI image runs a build with the read before attach ([upgrades](../operations/upgrades.md#upgrade-procedure))                                                                                                                                                                                                                                                                   |
+| An org found only in a log table of the first cell                                                                                                                           | never placed; once it is placed in another cell, its log rows here (`agent_events` identities among them) are outside its erasure there until the stray-org erase command removes them; `loom doctor --stray-orgs` names it                                                                                                                                                                                                          |
+| An org longer than `cell.ORG_MAX_BYTES` written before the limit                                                                                                             | the first attach refuses in its scan, naming it, until the runbook's manual procedure removes it; one first found in step 4 is skipped and named                                                                                                                                                                                                                                                                                     |
+| A writer, grant, role setting or subscription added after `serving`                                                                                                          | attach's checks ran once and pass it; `loom doctor` warns on the Postgres ones on every run                                                                                                                                                                                                                                                                                                                                          |
+| `LOOM_SERVES_TRAFFIC=false` on a pod a load balancer routes to                                                                                                               | attach does not require its router answer; its new orgs answer 503                                                                                                                                                                                                                                                                                                                                                                   |
+| A process that changes between attach's last check and the mode commit, or an HA manager that empties `synchronous_standby_names` between the checks around the durable read | not seen by attach: a window of seconds                                                                                                                                                                                                                                                                                                                                                                                              |
+| A cell process with a longer `LOOM_INSTANCE_HEARTBEAT_SECONDS` than attach's                                                                                                 | it can fall outside attach's live window while live; the runbook requires one value                                                                                                                                                                                                                                                                                                                                                  |
 
 ## Rolling upgrades
 
@@ -1306,11 +1391,16 @@ from its cache ([upgrades](../operations/upgrades.md#upgrade-procedure)).
   `loom doctor` names), with their functions in
   `schemas/pg_migrations/011_tenancy_triggers.sql` and `012_tenancy_guard.sql`;
   `server/cli/doctor_cell.py`: `loom doctor`'s cell checks;
-- `server/cli/cell_scan.py`: the first attach's org scan, a library no command calls: the
-  tables of both stores with an `org` column, judged by engine and against erasure's
-  classification, every host of a cluster listing the same, and the distinct orgs of each
-  table outside `LOG_TABLES`; `server/cli/cell_writers.py`: the ClickHouse writer check (the
-  users, user directories, objects and replicas outside the operator's allow lists);
+- `server/cli/cell_attach.py`: `loom cell attach`; `server/cli/cell_attach_pg.py`: its
+  Postgres reads and writes (the session checks, the attach lock, the tenancy-privilege
+  and unmarked-session checks doctor shares, the trigger pass, the mode commit, the
+  durable read, step 4's wait); `server/cli/cell_attach_beats.py`: its judgment of the
+  heartbeats and the rescan's watch;
+- `server/cli/cell_scan.py`: the first attach's org scan: the tables of both stores with
+  an `org` column, judged by engine and against erasure's classification, every host of a
+  cluster listing the same, and the distinct orgs of each table outside `LOG_TABLES`;
+  `server/cli/cell_writers.py`: the ClickHouse writer check (the users, user directories,
+  objects and replicas outside the operator's allow lists);
   `server/cli/cell_ch.py`: what both share (the cluster's hosts, the per-host reads);
 - `schemas/pg_migrations/008_cells.sql`, `schemas/pg_migrations/009_cell_probe.sql` and
   `schemas/migrations/094_cell_heartbeats.sql`: the cell's tables;
@@ -1386,14 +1476,14 @@ An integration test with two cells and a router in CI's Postgres job:
   CLI censuses cover the rest);
 - the first attach places every org with a row in any table, an org first seen during
   the attach is placed in step 4, and so is one a direct Postgres insert wrote between
-  step 2's snapshot and `enforced`, a ClickHouse row an older CLI wrote then and a
+  step 2's scan and `enforced`, a ClickHouse row an older CLI wrote then and a
   bucket object catalogued then; a process past `LOOM_JWT_REVOCATION_MAX_STALE_SECONDS`
   of failed reads of its own rows or mode is gated and serves again once a read lands; a
   pod with `LOOM_CELL` unset is unready, naming the setting, answers 503 to a bearer
   request, passes its health probe, answers the probe route and runs no worker on an
   attached cell and on a later cell between prepare and attach, keeps serving on a first
   cell in `recording`, and keeps the last mode it read through a failed read,
-  `recording` included after step 3 or step 4 returned the cell to it; a CLI command
+  `recording` included; a CLI command
   declaring an org with it unset is refused on an `enforced` or `partial` cell, an
   org-free one (a token revocation) runs, also with Postgres down on a deployment never
   prepared, and a `loom cell` store command refuses; `loom cell limit --closed` succeeds

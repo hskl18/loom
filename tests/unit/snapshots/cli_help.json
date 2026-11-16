@@ -397,8 +397,8 @@
   "options: -h, --help show this help message and exit --name NAME"
  ],
  "loom doctor": [
-  "usage: loom doctor [-h] [--json] [--client] [--server-url SERVER_URL] [--token TOKEN]",
-  "options: -h, --help show this help message and exit --json Emit the checks and the problem list as JSON. --client Also examine this machine as a coding-agent client: the server the hooks would call, the token they would present, whether it is accepted and can write the intended namespace, the Claude Code / Codex wiring, and capture jobs that never reached the server. --server-url SERVER_URL Override the client's server URL. --token TOKEN Override the client's token."
+  "usage: loom doctor [-h] [--json] [--client] [--server-url SERVER_URL] [--pg-allow-role PG_ALLOW_ROLE] [--stray-orgs] [--stray-orgs-budget STRAY_ORGS_BUDGET] [--token TOKEN]",
+  "options: -h, --help show this help message and exit --json Emit the checks and the problem list as JSON. --client Also examine this machine as a coding-agent client: the server the hooks would call, the token they would present, whether it is accepted and can write the intended namespace, the Claude Code / Codex wiring, and capture jobs that never reached the server. --server-url SERVER_URL Override the client's server URL. --pg-allow-role PG_ALLOW_ROLE On a cell: a Postgres role that may make an org held (the servers' role). --stray-orgs On a cell: also read the orgs its stores hold without a tenancy row. --stray-orgs-budget STRAY_ORGS_BUDGET Seconds --stray-orgs may read for, smallest tables first (default 60). --token TOKEN Override the client's token."
  ],
  "loom report": [
   "usage: loom report [-h] [--open]",
@@ -434,8 +434,8 @@
   "options: -h, --help show this help message and exit"
  ],
  "loom cell": [
-  "usage: loom cell [-h] {credential,limit,which,remove,prepare} ...",
-  "positional arguments: {credential,limit,which,remove,prepare} credential Make a router credential, or rotate a cell's. limit Close, reopen or bound a cell to new orgs. which Print the lookup's cell and host for an org (the first cell if not placed). remove Remove the directory row of a cell attaching with no placement. prepare Register this cell in the router's directory and write its rows.",
+  "usage: loom cell [-h] {credential,limit,which,remove,prepare,attach} ...",
+  "positional arguments: {credential,limit,which,remove,prepare,attach} credential Make a router credential, or rotate a cell's. limit Close, reopen or bound a cell to new orgs. which Print the lookup's cell and host for an org (the first cell if not placed). remove Remove the directory row of a cell attaching with no placement. prepare Register this cell in the router's directory and write its rows. attach Attach the prepared first cell: place its orgs, serve.",
   "options: -h, --help show this help message and exit"
  ],
  "loom cell credential": [
@@ -458,6 +458,10 @@
  "loom cell prepare": [
   "usage: loom cell prepare [-h] --cell CELL --host HOST --credential-sha256 SHA256 [--probe-url PROBE_URL] [--wait WAIT] [--router ROUTER]",
   "options: -h, --help show this help message and exit --cell CELL This cell's name (LOOM_CELL) --host HOST The host the cell serves its orgs at --credential-sha256 SHA256 The sha256 of the cell's router credential (`loom cell credential new`) --probe-url PROBE_URL A later cell's probe listener address (not the first's) --wait WAIT Seconds to retry a busy or unreachable probe listener --router ROUTER The router's URL (default: LOOM_CELL_ROUTER_URL)"
+ ],
+ "loom cell attach": [
+  "usage: loom cell attach [-h] --cell CELL [--wait WAIT] [--scan-budget SCAN_BUDGET] [--dry-run] [--ch-allow-user CH_ALLOW_USER] [--ch-allow-user-directory CH_ALLOW_USER_DIRECTORY] [--ch-allow-object CH_ALLOW_OBJECT] [--ch-allow-replica CH_ALLOW_REPLICA] [--pg-allow-role PG_ALLOW_ROLE] [--router ROUTER]",
+  "options: -h, --help show this help message and exit --cell CELL This cell's name (LOOM_CELL) --wait WAIT Seconds the waits share --scan-budget SCAN_BUDGET Seconds one full org scan may take --dry-run Run the refusals and the scan and print what would be placed; write nothing (the router's own begin refusals do not run) --ch-allow-user CH_ALLOW_USER A ClickHouse user that may write the configured databases --ch-allow-user-directory CH_ALLOW_USER_DIRECTORY A ClickHouse user directory the check cannot read --ch-allow-object CH_ALLOW_OBJECT A ClickHouse object (db.name) that writes the databases --ch-allow-replica CH_ALLOW_REPLICA A replica outside the cluster (db.table:replica) --pg-allow-role PG_ALLOW_ROLE A Postgres role that may make an org held (the servers' role) --router ROUTER The router's URL (default: LOOM_CELL_ROUTER_URL)"
  ],
  "loom tracker-probe": [
   "usage: loom tracker-probe [-h]",

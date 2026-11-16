@@ -286,7 +286,7 @@ async def _delete_nonces(ch: Any, nonces: dict[str, str | None]) -> None:
         try:
             await step()
         except Exception as e:  # noqa: BLE001 — every nonce is tried; a stale one holds no data
-            print(f"loom cell prepare: the probe nonce in {where} stays: {e}", file=sys.stderr)
+            print(f"loom cell: the probe nonce in {where} stays: {e}", file=sys.stderr)
 
 
 def _register_timeout() -> httpx.Timeout:
