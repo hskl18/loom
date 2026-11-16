@@ -9,6 +9,7 @@ service a ``Runner`` takes as ``memory_service=``. ADK's memory tools read it:
     from google.adk.runners import Runner
     from google.adk.sessions import InMemorySessionService
     from google.adk.tools import preload_memory
+    from google.genai import types
     from loom import Agent
     from loom.integrations.google_adk import LoomMemoryService
 
@@ -19,6 +20,7 @@ service a ``Runner`` takes as ``memory_service=``. ADK's memory tools read it:
 
 
     async with Agent(org="acme", namespace="support") as loom_agent:
+        sessions = InMemorySessionService()
         runner = Runner(
             app_name="support",
             agent=LlmAgent(
@@ -27,9 +29,15 @@ service a ``Runner`` takes as ``memory_service=``. ADK's memory tools read it:
                 tools=[preload_memory],
                 after_agent_callback=save_turn,
             ),
-            session_service=InMemorySessionService(),
+            session_service=sessions,
             memory_service=LoomMemoryService(loom_agent, app_name="support"),
         )
+        session = await sessions.create_session(app_name="support", user_id="alice")
+        message = types.Content(role="user", parts=[types.Part(text="I prefer aisle seats")])
+        async for event in runner.run_async(
+            user_id="alice", session_id=session.id, new_message=message
+        ):
+            ...
 
 ADK scopes memory by app and user. Loom's boundary is the namespace, so a
 service serves one ADK app, the namespace of its Loom agent, and refuses a
@@ -189,7 +197,7 @@ class LoomMemoryService(BaseMemoryService):
         self, *, app_name: str, user_id: str, memory_id: str | None = None
     ) -> None:
         self._check_scope(app_name, user_id)
-        if not memory_id:  # an entry with no id has nothing a key deletes, as in ADK's own
+        if not memory_id:  # no id, nothing to delete: ADK's InMemoryMemoryService also returns
             return
         key, session = _parse_entry_id(memory_id)
         await self._agent.memory.delete(key, user_id=user_id, session_id=session)

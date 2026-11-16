@@ -356,6 +356,7 @@ from google.adk.agents import LlmAgent
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.adk.tools import preload_memory
+from google.genai import types
 from loom import Agent
 from loom.integrations.google_adk import LoomMemoryService
 
@@ -366,6 +367,7 @@ async def save_turn(ctx):
 
 
 async with Agent(org="acme", namespace="support") as loom_agent:
+    sessions = InMemorySessionService()
     runner = Runner(
         app_name="support",
         agent=LlmAgent(
@@ -374,9 +376,15 @@ async with Agent(org="acme", namespace="support") as loom_agent:
             tools=[preload_memory],
             after_agent_callback=save_turn,
         ),
-        session_service=InMemorySessionService(),
+        session_service=sessions,
         memory_service=LoomMemoryService(loom_agent, app_name="support"),
     )
+    session = await sessions.create_session(app_name="support", user_id="alice")
+    message = types.Content(role="user", parts=[types.Part(text="I prefer aisle seats")])
+    async for event in runner.run_async(
+        user_id="alice", session_id=session.id, new_message=message
+    ):
+        ...
 ```
 
 ADK scopes memory by app and user. Loom's boundary is the namespace: a Loom write that

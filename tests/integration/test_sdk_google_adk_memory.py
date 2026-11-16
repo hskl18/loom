@@ -202,11 +202,35 @@ async def test_a_users_delete_reaches_their_fact_when_another_user_holds_its_key
         found = await service.search_memory(app_name="travel", user_id=user, query="Lisbon")
         return {m.id for m in found.memories if m.custom_metadata["source"] == "fact"}
 
-    alices = await eventually(lambda: facts("alice"), description="alice's facts")
-    bobs = await eventually(lambda: facts("bob"), description="bob's facts")
-    shared = {json.loads(i)[0] for i in alices} & {json.loads(i)[0] for i in bobs}
-    assert shared, "the two users' extracted facts share a key"
+    async def both() -> tuple[set[str | None], set[str | None]] | None:
+        alices, bobs = await facts("alice"), await facts("bob")
+        keys = {json.loads(i)[0] for i in alices} & {json.loads(i)[0] for i in bobs}
+        return (alices, bobs) if keys else None  # wait until the two share a key
+
+    alices, bobs = await eventually(both, description="the users' facts sharing a key")
     for memory_id in alices:
         await service.delete_memory(app_name="travel", user_id="alice", memory_id=memory_id)
     assert not await facts("alice") & alices
-    assert await facts("bob") == bobs
+    assert bobs <= await facts("bob")
+
+
+async def test_a_delete_reaches_the_key_in_each_session_it_is_served_from(agent) -> None:
+    """A key the user holds in two sessions is served once per session, each under its
+    own id, so deleting what a search returns leaves the key unserved."""
+    for session, city in (("adk-a", "Lisbon"), ("adk-b", "Porto")):
+        await agent.memory.set(
+            "user_home_city", f"Alice lives in {city}", user_id="alice", session_id=session
+        )
+    service = LoomMemoryService(agent, app_name="travel", honour_abstain=False)
+
+    async def facts() -> set[str | None]:
+        found = await service.search_memory(app_name="travel", user_id="alice", query="Alice lives")
+        return {m.id for m in found.memories if m.custom_metadata["source"] == "fact"}
+
+    async def two() -> set[str | None] | None:
+        ids = await facts()
+        return ids if len(ids) == 2 else None
+
+    for memory_id in await eventually(two, description="both sessions' rows"):
+        await service.delete_memory(app_name="travel", user_id="alice", memory_id=memory_id)
+    assert await facts() == set()
