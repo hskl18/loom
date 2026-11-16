@@ -401,19 +401,20 @@ async def _sync_mirrored(
     result: PassResult,
 ) -> None:
     """The mirrored sources' turns, ahead of the namespace sources: at most a third of
-    the pass and their own document bound. Those asked to sync go first, then the one
-    synced longest ago, so every source gets its turn however many there are."""
+    the pass and their own document bound, the one synced longest ago first, so every
+    source gets its turn however many there are. A sync request goes in that rotation
+    too: a source too large for one turn ends every turn incomplete, keeping its
+    request, and going first on it would starve the rest."""
     run = Pass(
         budget=_leg(whole, _MIRROR_SHARE),
         left=int(settings.knowledge_source_mirror_documents_per_pass),
     )
 
-    def order(src: KnowledgeSource) -> tuple[bool, str, str]:
+    def synced_at(src: KnowledgeSource) -> str:
         detail = json_object(states.get(_cursor_of(src), {}).get("detail", ""))
-        asked = str(detail.get("requested_at") or "")
-        return (not asked, asked, str(detail.get("last_synced_at") or ""))
+        return str(detail.get("last_synced_at") or "")
 
-    for src in sorted(mirrored, key=order):
+    for src in sorted(mirrored, key=synced_at):
         if run.spent():
             result.cut = True
             return
@@ -1367,7 +1368,9 @@ async def _write_mirrored_state(
     mirror_row: dict[str, str],
 ) -> None:
     """`_write_state` for a mirrored source: codes in the namespace row, the rest under
-    the mirror. A turn that failed before it knew its mirror writes the codes only."""
+    the mirror. A turn that failed before it knew its mirror, or that raised (its
+    result is then a fresh one), writes the codes only: the mirror row keeps what the
+    last turn that returned recorded."""
     now = _now_iso()
     stored = json_object(current.get("detail", ""))
     shown: dict[str, Any] = {k: stored[k] for k in ("requested_at", "full") if k in stored}

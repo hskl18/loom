@@ -132,7 +132,9 @@ async def _in_mirror(
         )
     except _Refused:
         return  # the store refused the account: nothing more is read or written
-    vouched = cycle.advance(started, skipped, result) if all_written and whole else None
+    lists_good = all_written and whole
+    # A head owed at the read was not among the copies, so its list was never read.
+    vouched = cycle.advance(started, skipped, result) if lists_good and not owed else None
     stored = sync.index_with_room(result, [c for c in copies if c["searchable"]])
     try:
         for f in files:
@@ -151,7 +153,7 @@ async def _in_mirror(
         gone = functools.partial(sync.file_gone, token, listing=listing, turn=result)
         by_id = {str(f["id"]): uri for uri, f in listed.items()}
         await sync.retire_absent(src, by_id, gone, run, result)
-    if vouched is None:
+    if not lists_good:
         return
     # Parked at the end outranks owed at the read; either holds the row back.
     held_back = await documents.publications_owed(src.org, src.mirror, suffix) or owed
@@ -167,6 +169,8 @@ async def _in_mirror(
         else:
             _note(result, note, first=True)
         return
+    if vouched is None:
+        return  # the cycle goes on from its cursor in the next turn
     pass_context.check_stop()
     await sync.require_current(src)  # an erasure since the last write lands no row
     await mirror_store.record_listing(src.org, src.mirror, src.source_id, src.name, vouched)

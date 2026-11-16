@@ -55,7 +55,7 @@ def test_a_leg_takes_its_share_of_the_pass_and_never_ends_past_it() -> None:
     assert source_sync._leg(ending, 1 / 3).stop_after == ending.stop_after
 
 
-def test_the_mirrored_source_synced_longest_ago_goes_first_after_the_asked(
+def test_the_mirrored_source_synced_longest_ago_goes_first_even_past_a_request(
     world: Any, mirror: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     order: list[str] = []
@@ -76,7 +76,9 @@ def test_the_mirrored_source_synced_longest_ago_goes_first_after_the_asked(
         "c": row(last_synced_at="2026-01-05T00:00:00+00:00", requested_at="2026-01-06T00:00:00"),
     }
     _pass(world, *(_mirrored(name=n) for n in "abc"))
-    assert order == ["c", "b", "a"]
+    # A request waits its turn: a source cut every turn keeps its request, and going
+    # first on it would starve the others.
+    assert order == ["b", "a", "c"]
 
 
 def test_a_mirrored_source_s_namespace_row_holds_only_its_codes(
@@ -234,3 +236,17 @@ def test_a_turn_that_fails_before_it_knows_its_mirror_leaves_the_mirror_s_state(
     asyncio.run(source_sync.run_sync())
     assert _own(world) == kept
     assert _detail(world)["status"] == "credential_invalid"
+
+
+def test_a_publication_owed_at_the_read_moves_no_cursor(
+    world: Any, mirror: Any, slow_lists: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _turn_with(world, slow_lists, 0)
+    answers = iter(["owed", ""])  # owed when the copies are read, settled by the end
+
+    async def _owed(org: str, namespace: str, uri_suffix: str) -> str:
+        return next(answers)
+
+    monkeypatch.setattr(source_sync.documents, "publications_owed", _owed)
+    _turn_with(world, slow_lists, 2)  # stops before the wrap: it would begin a cycle
+    assert _own(world).get("lists_cursor", "") == ""
