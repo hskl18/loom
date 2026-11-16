@@ -5,17 +5,16 @@ Every complete listing reads the lists again).
 
 The turn first brings every stored copy's list to what the store says now: the list of
 the file listed at its address, or `unread` for a copy a whole listing does not have
-there. A copy behind its file's revision takes only the part of the new list its own
-admitted: its text was shared under that list, and the content write widens it. A
-changed list is written as a new row over the stored one that keeps its chunks, so
-nothing is embedded again, and the same list writes nothing. The reads stop at half of
-what is left of the mirrors' share when they start, never at the document bound, and what
-was read is written.
-Then each new or changed file is fetched and written with its list, as a folder turn
-writes (a mirrored copy is never converted again for the pictures its stored text holds,
-as a folder turn does on a full listing), and at the full interval a copy whose file is
-gone is retired on the store's word. The listing row lands once every stored copy's list
-was brought up to date by a listing that searched everything.
+there. A copy behind its file's revision takes only the entries both lists hold: its
+text was shared under that list, and the content write widens it. A changed list is
+written as a new row over the stored one that keeps its chunks, so nothing is embedded
+again, and the same list writes nothing. The reads stop at half of what is left of the
+mirrors' share when they start, never at the document bound, and what was read is
+written. Then each new or changed file is fetched and written with its list, as a folder
+turn writes (a mirrored copy is never converted again for the pictures its stored text
+holds, as a folder turn does on a full listing), and at the full interval a copy whose
+file is gone is retired on the store's word. The listing row lands once every stored
+copy's list was brought up to date by a listing that searched everything.
 
 A source with more files lacking a list than a turn can read goes on from a cursor in the
 next turn, and the row of that cycle carries the start of the turn that began it. The

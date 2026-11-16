@@ -316,3 +316,28 @@ def test_a_turn_whose_list_reads_stop_still_retires_a_gone_file_at_the_full_inte
     result = _pass(world, _mirrored())
     assert result.removed == 1 and not any("/doc4/" in uri for uri in world.docs)
     assert "full_listed_at" in _own(world) and _own(world)["lists_cursor"]
+
+
+def test_the_list_reads_get_half_of_what_is_left_of_the_mirrors_share(
+    world: Any, mirror: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world.files = _files(1)
+    _pass(world, _mirrored())
+    legs: list[PassBudget] = []
+    lists: list[PassBudget] = []
+    real = source_sync._sync_one
+
+    async def _seen(src: Any, state: Any, run: Any, result: Any) -> Any:
+        legs.append(run.budget)
+        return await real(src, state, run, result)
+
+    class _Kept(PassBudget):
+        def __init__(self, started: float, stop_after: float) -> None:
+            super().__init__(started, stop_after)
+            lists.append(self)
+
+    monkeypatch.setattr(source_sync, "_sync_one", _seen)
+    monkeypatch.setattr(source_sync_mirror, "PassBudget", _Kept)
+    _pass(world, _mirrored())
+    [leg], [read] = legs, lists
+    assert read.stop_after - read.started == pytest.approx((leg.stop_after - read.started) / 2)

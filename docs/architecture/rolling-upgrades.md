@@ -809,20 +809,20 @@ schema. These rules keep that safe. The operator procedure is in
     `tests/unit/test_knowledge_source_revisions_sql.py` check N's side.
 55. **The mirrored sources' share of a pass**: N runs the mirrored sources first, until
     a third of the time the pass starts work in has passed (a quarter of
-    `knowledge_source_sync_max_pass_seconds` at the default fraction) and under their
-    own document bound (`LOOM_KNOWLEDGE_SOURCE_MIRROR_DOCUMENTS_PER_PASS`), the one
-    synced longest ago first, a sync request included; the namespace sources then have
-    the rest of the pass under their own bound. A mirrored source's turn keeps its own
-    state under its mirror and source id, leaves only its request, status and time in
-    the namespace row, spends as the mirror, and reads the lists on from a cursor in
-    that state, in at most half of what is left of the mirrors' share when its turn
-    reaches them, so its new and changed files still get time, and a turn whose list
-    reads stop there is still complete, so it retires gone files and keeps the full
-    interval; a cycle's listing row carries the start of the turn that began it. N-1
-    runs a mirrored source under the whole pass's bounds and keeps its whole state in
-    the namespace row; N reads neither N-1's fields there nor N-1 the mirror row, so a
-    mixed fleet reads some lists again and retries some waits, and the next N turn drops
-    N-1's fields from the namespace row. No request can add a mirrored source yet.
+    `knowledge_source_sync_max_pass_seconds`) and under their own document bound
+    (`LOOM_KNOWLEDGE_SOURCE_MIRROR_DOCUMENTS_PER_PASS`), the one synced longest ago
+    first, a sync request included; the namespace sources then have the rest of the pass
+    under their own bound. A mirrored source's turn keeps its own state under its mirror
+    and source id, leaves only its request, status and time in the namespace row, spends
+    as the mirror, and reads the lists on from a cursor in that state, in at most half
+    of what is left of the mirrors' share when its turn reaches them, so its new and
+    changed files still get time, and a turn whose list reads stop there is still
+    complete, so it retires gone files and keeps the full interval; a cycle's listing
+    row carries the start of the turn that began it. N-1 runs a mirrored source under
+    the whole pass's bounds and keeps its whole state in the namespace row; N reads
+    neither N-1's fields there nor N-1 the mirror row, so a mixed fleet reads some lists
+    again and retries some waits, and the next N turn drops N-1's fields from the
+    namespace row. No request can add a mirrored source yet.
     `tests/unit/test_knowledge_source_mirror_pass.py` checks N's side.
 
 ## What checks them

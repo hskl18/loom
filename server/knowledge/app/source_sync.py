@@ -8,11 +8,11 @@ and a mirrored folder source, has its own turn module (`source_sync_linear`,
 bookkeeping goes in `TurnResult.kind_state`, which the sync state keeps.
 
 A pass reads the active sources and drops those whose namespace is inactive. The
-mirrored sources go first, in at most a third of the pass and under their own document
-bound (`_sync_mirrored`); the namespace sources then have the rest of the pass. Among
-the namespace sources, those a namespace's admin asked to sync (`sync_now`) go first,
-the rest from where the previous pass stopped. Each source's turn holds the source's own
-lease, so two copies of the worker never sync it at once.
+mirrored sources go first, starting work during the first quarter of the pass under
+their own document bound (`_sync_mirrored`); the namespace sources then have the rest of
+the pass. Among the namespace sources, those a namespace's admin asked to sync
+(`sync_now`) go first, the rest from where the previous pass stopped. Each source's turn
+holds the source's own lease, so two copies of the worker never sync it at once.
 
 A turn lists the source's files: every file on its first turn, when asked (`full`) and
 once `knowledge_source_sync_full_interval_seconds` have passed since the last full
@@ -394,11 +394,11 @@ async def _sync_mirrored(
     whole: PassBudget,
     result: PassResult,
 ) -> None:
-    """The mirrored sources' turns, ahead of the namespace sources: at most a third of
-    the pass and their own document bound, the one synced longest ago first, so every
-    source gets its turn however many there are. A sync request goes in that rotation
-    too: a source too large for one turn ends every turn incomplete, keeping its
-    request, and going first on it would starve the rest."""
+    """The mirrored sources start work in the first quarter of the pass under their own
+    document bound, the one synced longest ago first, so every source gets its turn
+    however many there are. A sync request goes in that rotation
+    too: a source whose turns keep ending incomplete (one with more changed files than
+    the bound) keeps its request, and going first on it would starve the rest."""
     run = Pass(
         budget=whole.phase(1 - _MIRROR_SHARE),
         left=int(settings.knowledge_source_mirror_documents_per_pass),
