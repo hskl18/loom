@@ -8,8 +8,9 @@ the file listed at its address, or `unread` for a copy a whole listing does not 
 there. A copy behind its file's revision takes only the part of the new list its own
 admitted: its text was shared under that list, and the content write widens it. A
 changed list is written as a new row over the stored one that keeps its chunks, so
-nothing is embedded again, and the same list writes nothing. The reads are bounded by
-the pass's deadline only, never by its document bound, and what was read is written.
+nothing is embedded again, and the same list writes nothing. The reads stop at half of
+what is left of the mirrors' share when they start, never at the document bound, and what
+was read is written.
 Then each new or changed file is fetched and written with its list, as a folder turn
 writes (a mirrored copy is never converted again for the pictures its stored text holds,
 as a folder turn does on a full listing), and at the full interval a copy whose file is
@@ -206,13 +207,13 @@ class _Cycle:
         """Record where the next turn goes on, and return the start a listing row
         may carry: this turn's when it read every list, the cycle's when it read the
         rest of the cycle's, else None."""
-        now = started.isoformat()
+        start = started.isoformat()
         if stopped_at is None:
             nxt, vouched = _Cycle("", ""), started
         elif self.cursor and stopped_at < self.cursor:  # past the wrap: the cycle is done
-            nxt, vouched = _Cycle(stopped_at, now), datetime.fromisoformat(self.since)
+            nxt, vouched = _Cycle(stopped_at, start), datetime.fromisoformat(self.since)
         else:
-            nxt, vouched = _Cycle(stopped_at, self.since or now), None
+            nxt, vouched = _Cycle(stopped_at, self.since or start), None
         nxt.keep(result)
         return vouched
 
@@ -249,7 +250,8 @@ async def _refresh_lists(
     """Rewrite each stored copy's list to the store's, in the order given, compared
     with the one the storage authority holds and written a batch at a time. Whether
     every changed list was written (a copy not this source's keeps its own), and the
-    first copy whose list the deadline left unread, None when there was none."""
+    first copy whose list the lists' half of the share left unread, None when there was
+    none."""
     all_written = True
     stopped_at: str | None = None
     # Half of what is left of the leg, so the new and changed files still get time.
@@ -267,8 +269,8 @@ async def _refresh_lists(
                 if f is None and not whole:
                     continue  # an incomplete search may have missed it: it keeps its list
                 if f is not None and "permissions" not in f and lists_budget.exhausted():
-                    # Past the deadline no list is read, but every one that needs no
-                    # read is still compared; this one keeps its list for now.
+                    # Past the lists' half of the share no list is read, but every one
+                    # that needs no read is still compared; this one keeps its list.
                     result.mark(sync.TurnMark.PASS_BOUND)
                     stopped_at = stopped_at or uri
                     continue

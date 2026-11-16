@@ -99,7 +99,9 @@ def test_a_mirrored_source_s_namespace_row_holds_only_its_codes(
 
     monkeypatch.setattr(gdrive, "file_permissions", _fails)
     world.files = _files(2)  # listed without lists: each needs a read, and each fails
-    world.states["decks"] = {"state_value": "", "detail": json.dumps({"requested_at": "t"})}
+    # An N-1 turn left its whole state in the namespace row; this turn drops it.
+    left = {"requested_at": "t", "file_waits": {"doc1": ["r", 1, "x"]}, "error": "export"}
+    world.states["decks"] = {"state_value": "", "detail": json.dumps(left)}
     _pass(world, _mirrored())
     shown = _detail(world)
     assert set(shown) == {"last_synced_at", "status"}  # the request was answered
@@ -121,16 +123,21 @@ def test_a_mirrored_turn_spends_as_its_mirror(
     world: Any, mirror: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     seen: list[str] = []
+    named: list[tuple[str, str]] = []
     real = source_sync.sync_file
 
     async def _attributed(*a: Any, **kw: Any) -> Any:
         seen.append(customer.attribution().namespace)
         return await real(*a, **kw)
 
+    def _identity(name: str, *, org: str = "", namespace: str = "", **kw: Any) -> None:
+        named.append((name, namespace))
+
     monkeypatch.setattr(source_sync, "sync_file", _attributed)
+    monkeypatch.setattr(source_sync_mirror, "set_worker_identity", _identity)
     world.files = _files(1, permissions=READERS)
     _pass(world, _mirrored())
-    assert seen == [MIRROR]
+    assert seen == [MIRROR] and named == [(source_sync.WORKER, MIRROR)]
 
 
 @pytest.fixture
@@ -199,6 +206,7 @@ def test_the_namespace_sources_keep_the_pass_s_own_budget_after_the_mirrors(
     world: Any, mirror: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     budgets: dict[str, PassBudget] = {}
+    deadlines: dict[str, float] = {}
     real = source_sync._sync_one
 
     async def _seen(src: Any, state: Any, run: Any, result: Any) -> Any:
@@ -206,7 +214,6 @@ def test_the_namespace_sources_keep_the_pass_s_own_budget_after_the_mirrors(
         deadlines[src.name] = source_sync._read_deadline(run)
         return await real(src, state, run, result)
 
-    deadlines: dict[str, float] = {}
     monkeypatch.setattr(source_sync, "_sync_one", _seen)
     whole = source_sync._budget()
     monkeypatch.setattr(source_sync, "_budget", lambda: whole)
