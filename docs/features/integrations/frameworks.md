@@ -384,19 +384,19 @@ matches a memory of the namespace merges into it, whichever agent wrote that mem
 apps sharing a namespace would share and lose memories. A service therefore serves one ADK
 app, named by `app_name`, in the namespace of its Loom agent, and refuses a call for
 another app; give each app its own namespace and service. The ADK user is the Loom
-`user_id`. ADK's memory spans sessions, so rows carry no session and a search reads all of
-the user's memories in the namespace.
+`user_id`. Extraction runs under the ADK session, which keys Loom's record of the turns,
+and a search reads all of the user's memories in the namespace, from every session.
 
 | ADK                     | Loom                                                                                                                                                                                                                                                                                                                                |
 | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `add_session_to_memory` | the text of the session's events, without the ones a rewind took back, sent to `memory.set_from_messages`; Loom extracts the facts and resolves duplicates and conflicts. A session added again is extracted again, so a callback that runs every turn, as `after_agent_callback` does, saves that turn's events, as in the example |
-| `add_events_to_memory`  | the same for the events given, such as the latest turn                                                                                                                                                                                                                                                                              |
-| `add_memory`            | one `memory.set` per entry under `adk/<first 20 hex of sha256(text)>`, its `timestamp` as the memory's `valid_at` when it is ISO 8601                                                                                                                                                                                               |
-| `search_memory`         | `memory.search` of the namespace; with `honour_abstain`, leaves out memories below Loom's floor and returns nothing when Loom abstains; each entry's `custom_metadata` carries `similarity` and `source`, and its `timestamp` is `valid_at` when the row has one                                                                    |
-| `delete_memory`         | `memory.delete` of the entry's `id`: the memory's key, or for a verbatim chunk the key of the memory it was written under. An entry Loom cannot delete by key, such as a session summary, has no `id`; [erasure](../memory/retention-and-erasure.md) removes it                                                                     |
+| `add_events_to_memory`  | the same for the events given, such as the latest turn; a turn saved before a later rewind keeps its memories, which the app deletes by the ids a search returns                                                                                                                                                                    |
+| `add_memory`            | one `memory.set` per entry under `adk/<first 20 hex of sha256(user and text)>`, its `timestamp` as the memory's `valid_at` when it is ISO 8601                                                                                                                                                                                      |
+| `search_memory`         | `memory.search` of the user's memories; with `honour_abstain`, leaves out memories below Loom's floor and returns nothing when Loom abstains; each entry's `custom_metadata` carries `similarity` and `source`, and its `timestamp` is `valid_at` when the row has one                                                              |
+| `delete_memory`         | `memory.delete` of the entry's `id`, the memory's key. A verbatim chunk of a conversation or a session summary has no `id`: no key deletes it, and [erasure](../memory/retention-and-erasure.md) removes it                                                                                                                         |
 
 Events keep their text parts only: the model's thoughts and tool calls and results are not
-sent, and neither is `custom_metadata`.
+sent, and neither is `custom_metadata` or an entry's `author` and `id`.
 
 | `LoomMemoryService` argument | Default  | Effect                                                                                         |
 | ---------------------------- | -------- | ---------------------------------------------------------------------------------------------- |
