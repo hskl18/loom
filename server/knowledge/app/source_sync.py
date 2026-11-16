@@ -145,8 +145,8 @@ log = logging.getLogger("loom.knowledge.source_sync")
 WORKER = "knowledge_source_sync"
 # The share of the pass deadline after which no new source is started.
 _BUDGET_FRACTION = 0.75  # not a setting: the shape every cursor-resumed worker uses
-# The mirrored sources' share of a pass: every listing of theirs reads every file's list,
-# so they are bounded apart from the namespace sources.
+# The mirrored sources' share of the time a pass starts work in: every listing of theirs
+# reads every file's list, so they are bounded apart from the namespace sources.
 _MIRROR_SHARE = 1 / 3  # not a setting: the design's split of a pass
 # A source's lease outlives a stalled renewal by this much; it is renewed while held.
 _LEASE_TTL_S = 120.0  # not a setting: the entry-lease shape
@@ -328,13 +328,6 @@ def _budget() -> PassBudget:
     return PassBudget(started, started + seconds)
 
 
-def _leg(whole: PassBudget, share: float) -> PassBudget:
-    """From now until `share` of the pass's seconds after the pass's start: what ran
-    before (an admin's delete requests) comes out of it, never out of the rest."""
-    end = whole.started + (whole.stop_after - whole.started) * share
-    return PassBudget(time.monotonic(), min(end, whole.stop_after))
-
-
 async def run_sync(
     *, org: str = "", namespace: str = "", only: str = "", full: bool = False
 ) -> PassResult:
@@ -407,7 +400,7 @@ async def _sync_mirrored(
     too: a source too large for one turn ends every turn incomplete, keeping its
     request, and going first on it would starve the rest."""
     run = Pass(
-        budget=_leg(whole, _MIRROR_SHARE),
+        budget=whole.phase(1 - _MIRROR_SHARE),
         left=int(settings.knowledge_source_mirror_documents_per_pass),
     )
 
@@ -1315,7 +1308,7 @@ async def _write_state(src: KnowledgeSource, read: dict[str, str], turn: TurnRes
         current = states.get(src.name) or {}
         detail = json_object(current.get("detail", ""))
         if mirror_synced(src):
-            await _write_mirrored_state(src, read, turn, current, mirror_row)
+            await _write_mirrored_state(src, read, turn, current, detail, mirror_row)
             return
         asked = json_object(read.get("detail", "")).get("requested_at")
         now = _now_iso()
@@ -1366,6 +1359,7 @@ async def _write_mirrored_state(
     read: dict[str, str],
     turn: TurnResult,
     current: dict[str, str],
+    stored: dict[str, Any],
     mirror_row: dict[str, str],
 ) -> None:
     """`_write_state` for a mirrored source: codes in the namespace row, the rest under
@@ -1373,7 +1367,6 @@ async def _write_mirrored_state(
     result is then a fresh one), writes the codes only: the mirror row keeps what the
     last turn that returned recorded."""
     now = _now_iso()
-    stored = json_object(current.get("detail", ""))
     shown: dict[str, Any] = {k: stored[k] for k in ("requested_at", "full") if k in stored}
     asked = json_object(read.get("detail", "")).get("requested_at")
     shown.update(last_synced_at=now, status=turn.status)

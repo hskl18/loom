@@ -29,10 +29,12 @@ import contextlib
 import dataclasses
 import functools
 import logging
+import time
 from datetime import UTC, datetime
 from typing import Any
 
 from server.clients import gdrive
+from server.code.app.index.pass_budget import PassBudget
 from server.core.ch import sequential_reads
 from server.core.pg_lease import PublicationPending
 from server.knowledge.app import mirrors
@@ -87,6 +89,7 @@ async def turn(src: KnowledgeSource, state: dict[str, str], run: sync.Pass) -> s
     mirror = await mirrors.ensure_mirror(src.org, src.namespace, still_current=current)
     if mirror != known:  # a new mirror: nothing the old state says is about it
         detail = await _own_state(src, "", asked)
+        result.full = bool(detail.get("full")) or sync.full_due(detail)
         sync.start_waits(result, detail)
     result.mirror = mirror
     src = dataclasses.replace(src, mirror=mirror)
@@ -127,14 +130,14 @@ async def _in_mirror(
         copies = await store.every_copy(src.org, *home(src))
     cycle = _Cycle.of(detail)
     try:
-        all_written, skipped = await _refresh_lists(
+        all_written, stopped_at = await _refresh_lists(
             src, token, cycle.rotated(copies), listed, whole, run, result
         )
     except _Refused:
         return  # the store refused the account: nothing more is read or written
     lists_good = all_written and whole
     # A head owed at the read was not among the copies, so its list was never read.
-    vouched = cycle.advance(started, skipped, result) if lists_good and not owed else None
+    vouched = cycle.advance(started, stopped_at, result) if lists_good and not owed else None
     stored = sync.index_with_room(result, [c for c in copies if c["searchable"]])
     try:
         for f in files:
@@ -198,18 +201,18 @@ class _Cycle:
         ]
 
     def advance(
-        self, started: datetime, skipped: str | None, result: sync.TurnResult
+        self, started: datetime, stopped_at: str | None, result: sync.TurnResult
     ) -> datetime | None:
         """Record where the next turn goes on, and return the start a listing row
         may carry: this turn's when it read every list, the cycle's when it read the
         rest of the cycle's, else None."""
         now = started.isoformat()
-        if skipped is None:
+        if stopped_at is None:
             nxt, vouched = _Cycle("", ""), started
-        elif self.cursor and skipped < self.cursor:  # past the wrap: the cycle is done
-            nxt, vouched = _Cycle(skipped, now), datetime.fromisoformat(self.since)
+        elif self.cursor and stopped_at < self.cursor:  # past the wrap: the cycle is done
+            nxt, vouched = _Cycle(stopped_at, now), datetime.fromisoformat(self.since)
         else:
-            nxt, vouched = _Cycle(skipped, self.since or now), None
+            nxt, vouched = _Cycle(stopped_at, self.since or now), None
         nxt.keep(result)
         return vouched
 
@@ -248,7 +251,10 @@ async def _refresh_lists(
     every changed list was written (a copy not this source's keeps its own), and the
     first copy whose list the deadline left unread, None when there was none."""
     all_written = True
-    skipped: str | None = None
+    stopped_at: str | None = None
+    # Half of what is left of the leg, so the new and changed files still get time.
+    now = time.monotonic()
+    lists_budget = PassBudget(now, now + max(0.0, run.budget.stop_after - now) / 2)
     for start in range(0, len(copies), _REWRITE_BATCH):
         batch = copies[start : start + _REWRITE_BATCH]
         held = {c["source_uri"]: c["access_json"] for c in batch}
@@ -260,11 +266,11 @@ async def _refresh_lists(
                 f = listed.get(uri)
                 if f is None and not whole:
                     continue  # an incomplete search may have missed it: it keeps its list
-                if f is not None and "permissions" not in f and run.budget.exhausted():
+                if f is not None and "permissions" not in f and lists_budget.exhausted():
                     # Past the deadline no list is read, but every one that needs no
                     # read is still compared; this one keeps its list for now.
                     result.mark(sync.TurnMark.PASS_BOUND)
-                    skipped = skipped or uri
+                    stopped_at = stopped_at or uri
                     continue
                 access = access_list.UNREAD if f is None else await _file_access(token, f, result)
                 stored = access_list.from_json(held[uri])
@@ -281,7 +287,7 @@ async def _refresh_lists(
             # A listing must not vouch for a list it could not write; later batches go on.
             _note(result, "permissions: a stored copy is not this source's to write")
             all_written = False
-    return all_written, skipped
+    return all_written, stopped_at
 
 
 async def _file_access(

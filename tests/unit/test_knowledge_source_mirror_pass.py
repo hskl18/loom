@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from datetime import datetime
 from typing import Any
 
@@ -15,7 +14,7 @@ import pytest
 
 from server.clients import gdrive
 from server.code.app.index.pass_budget import PassBudget
-from server.knowledge.app import source_sync
+from server.knowledge.app import source_sync, source_sync_mirror
 from server.knowledge.store import mirrors as mirror_store
 from server.llm import customer
 from server.settings import settings
@@ -48,14 +47,22 @@ def test_the_mirrored_sources_run_first_under_their_own_document_bound(
     assert result.sources == 2 and result.cut
 
 
-def test_a_leg_ends_at_its_share_of_the_pass_from_the_pass_s_start() -> None:
-    now = time.monotonic()
-    whole = PassBudget(started=now - 300, stop_after=now + 150)  # 300 s already spent
-    leg = source_sync._leg(whole, 1 / 3)
-    # The leg's share ends 150 s into the pass: what ran before it came out of it.
-    assert leg.stop_after == pytest.approx(now - 150) and leg.exhausted() is True
-    ending = PassBudget(started=now, stop_after=now + 1)
-    assert source_sync._leg(ending, 2).stop_after == ending.stop_after
+def test_the_list_reads_leave_time_for_the_new_files(
+    world: Any, mirror: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world.files = _files(1)
+    _pass(world, _mirrored())  # doc1 stored, its list read with its write
+
+    class _Spent(PassBudget):
+        def exhausted(self) -> bool:
+            return True  # the list reads' half of the leg is gone at once
+
+    monkeypatch.setattr(source_sync_mirror, "PassBudget", _Spent)
+    world.files = [*_files(1), _file("doc9", DOCS, "2026-01-09T00:00:00.000Z")]
+    before = len(world.upserts)
+    _pass(world, _mirrored())
+    assert [w.source_uri.split("/")[-2] for w, _ in world.upserts[before:]] == ["doc9"]
+    assert _own(world)["lists_cursor"].endswith("/doc1/edit#id-decks")
 
 
 def test_the_mirrored_source_synced_longest_ago_goes_first_even_past_a_request(
