@@ -270,7 +270,7 @@ def test_lists_read_before_the_pass_runs_out_are_written_and_no_listing_row_land
     for f in world.files:
         del f["permissions"]  # a shared drive's files: read one at a time
     listings = len(mirror["listings"])
-    result = _turn(world, _mirrored())
+    _turn(world, _mirrored())
     [row] = mirror["rewrites"]  # the one list read before the deadline
     assert access_list.from_json(row["access_json"]) == access_list.AccessList()
     assert _own(world)["lists_cursor"] and len(world.upserts) == 2
@@ -637,7 +637,7 @@ def test_a_cut_in_a_later_batch_keeps_the_earlier_batches_writes(
     for f in world.files:
         del f["permissions"]
     listings = len(mirror["listings"])
-    result = _turn(world, _mirrored())
+    _turn(world, _mirrored())
     narrowed = sorted(r["source_uri"] for r in mirror["rewrites"])
     assert _own(world)["lists_cursor"] and narrowed == sorted(world.docs)[:2]  # batches 1, 2
     assert len(mirror["listings"]) == listings
@@ -664,7 +664,7 @@ def test_past_the_deadline_a_list_the_listing_carried_is_still_written(
     del world.files[0]["permissions"]  # doc1's list needs a read, which the deadline stops
     world.files[1]["permissions"] = []  # doc2's, narrowed, came with the listing
     listings = len(mirror["listings"])
-    result = _turn(world, _mirrored())
+    _turn(world, _mirrored())
     [row] = mirror["rewrites"]
     assert row["source_uri"].split("/")[-2] == "doc2"
     assert access_list.from_json(row["access_json"]) == access_list.AccessList()
