@@ -402,19 +402,24 @@ def test_a_call_for_another_app_is_refused() -> None:
     assert fake.calls == []
 
 
-def test_an_entry_id_is_the_key_delete_memory_deletes() -> None:
+def test_only_a_fact_gets_an_entry_id_and_it_carries_the_rows_session() -> None:
     hits = [
-        _hit("adk/1", "a fact"),
+        _hit("user_seat", "a fact", session_id="adk-1"),
+        _hit("adk/1", "an entry"),
         _hit("chunk:adk/1:0", "a passage", source="chunk", parent_memory_key="adk/1"),
         _hit("chunk:s1:0", "a turn", source="chunk", parent_memory_key="adk/1"),
         _hit("summary:s1", "a session", source="summary"),
     ]
-    found = asyncio.run(
-        _service(_FakeMemory(hits)).search_memory(app_name="travel", user_id="u", query="q")
-    )
-    assert [m.id for m in found.memories] == [_entry_id("adk/1", "-"), None, None, None]
-    sources = ["fact", "chunk", "chunk", "summary"]
+    fake = _FakeMemory(hits)
+    service = _service(fake)
+    found = asyncio.run(service.search_memory(app_name="travel", user_id="u", query="q"))
+    ids = [m.id for m in found.memories]
+    assert ids == [_entry_id("user_seat", "adk-1"), _entry_id("adk/1", "-"), None, None, None]
+    sources = ["fact", "fact", "chunk", "chunk", "summary"]
     assert [m.custom_metadata["source"] for m in found.memories] == sources
+    # The id a search returned deletes that row: its key under its session.
+    asyncio.run(service.delete_memory(app_name="travel", user_id="u", memory_id=ids[0]))
+    assert fake.calls[-1] == ("delete", ("user_seat",), {"user_id": "u", "session_id": "adk-1"})
 
 
 def test_without_google_adk_the_import_names_the_extra(monkeypatch: pytest.MonkeyPatch) -> None:
