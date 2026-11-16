@@ -135,10 +135,11 @@ procedure as an over-long org's.
 
 `loom doctor` runs attach's point-in-time checks again on every run: it warns on a Postgres
 role outside the owner roles, the superusers and its own `--pg-allow-role` that can make an
-org held or lower the mode (`cell_tenancy_privilege`), and on a role or database setting or
-a subscription that passes an unchecked writer (`cell_unchecked_writers`). A grant or a
-writer added after `serving` passes attach's checks, which ran once; doctor is how it is
-found.
+org held or lower the mode (`cell_tenancy_privilege`). Attach exempts the role it runs as,
+the operator's; doctor does not exempt the role it runs as, so a CI or monitoring role
+holding such a right is named. It warns too on a role or database setting or a subscription
+that passes an unchecked writer (`cell_unchecked_writers`). A grant or a writer added after
+`serving` passes attach's checks, which ran once; doctor is how it is found.
 
 ## Related
 

@@ -1007,10 +1007,11 @@ It refuses, before any write, naming each:
   without one, or a role that may not write the durable read's logical message; a role
   of attach's own lacking its grants (`pg_read_all_stats` among them) or a server with
   `max_prepared_transactions` above 0;
-- **the tenancy-privilege check**: a login role, other than attach's own (superusers,
-  and a role that itself owns `loom.tenancy`, `loom.tenancy_mode` or a guarded table) and
-  those named with `--pg-allow-role`, that holds or reaches through any membership a right
-  to make an org held or lower the mode: `INSERT` on any column of `loom.tenancy` or
+- **the tenancy-privilege check**: a login role, other than attach's own (the role attach
+  runs as, which the operator runs it with; superusers; and a role that itself owns
+  `loom.tenancy`, `loom.tenancy_mode` or a guarded table) and those named with
+  `--pg-allow-role`, that holds or reaches through any membership a right to make an org
+  held or lower the mode: `INSERT` on any column of `loom.tenancy` or
   `UPDATE` of its `org`, `INSERT` on `loom.tenancy_mode` or `UPDATE` of its `mode`,
   `TRIGGER` on a `loom` table, `CREATE` on the database or a schema that is not a system
   one (a function there can shadow one the servers call unqualified on their marked

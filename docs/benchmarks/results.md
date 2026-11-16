@@ -1241,14 +1241,17 @@ PYTHONPATH=$PWD .venv/bin/python bench/cell_trigger_gate.py --base-url <server> 
 | 1,000-row insert, marked (median)   | 11.0, 9.2, 8.5 ms      | 9.7, 11.1, 10.6 ms     |
 | 1,000-row insert, unmarked (median) | 22.1, 21.4, 21.0 ms    | 10.9, 9.6, 11.0 ms     |
 
-The marked batch, which is what a delivery pass of a cell's own processes writes, shows no
-cost the rounds can tell from zero (on minus off: +1.3, −1.9, −2.1 ms), within the 10% gate.
-The `memory.set` figures move by more between rounds of one configuration than any trigger
-cost: on this loaded host the p99 differences within a round (+214.8, +47.0, +24.3 ms
-here, and −71.7, −10.0, −42.4 ms in an earlier run of the same measurement) have no
-consistent sign, so this run cannot resolve a 10 ms p99 gate; it shows no rise beyond the
-host's noise, and the statement-level figures above bound the marked cost at under a
-microsecond a row. An unmarked session pays about 11 µs a row, as above.
+The marked batch is what a delivery pass of a cell's own processes writes. On minus off
+within each round it moved +1.3, −1.9 and −2.1 ms (+13.4%, −17.1% and −19.8%); the means are
+9.6 ms on and 10.5 ms off, −0.9 ms (−8.6%). The delivery-pass gate (at most 10% slower) is
+met on the mean, but one round of three was 13% slower and three rounds give no paired bound
+(methodology's paired bootstrap is for per-item labels), so this run does not establish the
+gate on its own; the statement-level figures above do, at under a microsecond a row against
+about 10 µs a row of insert. The `memory.set` figures move by more between rounds of one
+configuration than any trigger cost: on this loaded host the p99 differences within a round
+(+214.8, +47.0, +24.3 ms here, and −71.7, −10.0, −42.4 ms in an earlier run of the same
+measurement) have no consistent sign: the `memory.set` p99 gate (a rise of at most 10 ms) is
+unresolved locally. An unmarked session pays about 11 µs a row, as above.
 
 ## Reference computations
 
