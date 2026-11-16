@@ -268,8 +268,8 @@ async def test_the_trigger_pass_refuses_at_once_a_table_it_cannot_alter(
     async def holders(_c: Any, _t: str) -> list[Any]:
         return []
 
-    async def ensure_table(*_a: Any, **_kw: Any) -> str:
-        return "denied"
+    async def ensure_table(*_a: Any, **_kw: Any) -> Any:
+        return cell_triggers.Outcome("denied")
 
     monkeypatch.setattr(cell_triggers, "planned_tables", planned)
     monkeypatch.setattr(cell_triggers, "holders", holders)
@@ -280,14 +280,22 @@ async def test_the_trigger_pass_refuses_at_once_a_table_it_cannot_alter(
     assert refusal.subject == "postgres loom.scope_generations"
     assert "cannot alter it" in refusal.reason and wait.spent < 1
 
-    async def busy(*_a: Any, **_kw: Any) -> str:
+    holders = iter(["pid 7", "pid 7", "pid 7", "pid 8"] + ["pid 8"] * 100)
+
+    async def busy(*_a: Any, **_kw: Any) -> Any:
         clock.now += 0.1
-        return "busy"
+        return cell_triggers.Outcome("busy", next(holders))
 
     monkeypatch.setattr(cell_triggers, "ensure_table", busy)
-    wait = apg.Wait(3, clock)
-    (refusal,) = await apg.ensure_triggers(conn, wait, lambda _t: None)
-    assert "not taken within --wait" in refusal.reason and wait.spent <= 3
+    wait = apg.Wait(10, clock)
+    logged: list[str] = []
+    (refusal,) = await apg.ensure_triggers(conn, wait, logged.append)
+    assert "not taken within --wait" in refusal.reason and wait.spent <= 10
+    # Said once per change of holders, not once a try.
+    assert logged == [
+        "loom.scope_generations: its lock is busy (pid 7); retrying",
+        "loom.scope_generations: its lock is busy (pid 8); retrying",
+    ]
 
 
 # -- the rescan's watch ----------------------------------------------------------------
@@ -828,3 +836,189 @@ async def test_doctor_names_both_catalog_checks_when_the_catalog_is_unread(
     lines = {n: (g, d) for n, g, d in await doctor_cell._checks(None)}
     for name in ("cell_tenancy_privilege", "cell_unchecked_writers"):
         assert lines[name] == ("WARN", "not read: OSError: the catalog read failed")
+
+
+@pytest.mark.asyncio
+async def test_the_ddl_lock_bound_is_taken_after_the_migration_lock(clock: _Clock) -> None:
+    """A migration lock that took the rest of --wait leaves no DDL try."""
+
+    def migration_lock(*_a: Any) -> str:
+        clock.now += 2.0  # the rest of --wait
+        return "OK"
+
+    conn = FakeConn([("pg_advisory_lock", migration_lock), ("pg_advisory_unlock", "OK")])
+    wait = apg.Wait(2, clock)
+    with wait.counting():
+        outcome = await apg._ensure_one(conn, "scope_generations", 100, wait)
+    assert outcome.answer == "busy"
+    assert not any(
+        "lock_timeout = '" in s and "ms'" in s and "SET LOCAL" in s for s in conn.executed
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_mode_transaction_that_will_not_end_is_named(clock: _Clock) -> None:
+    held = [{"pid": 5, "application_name": "attach", "xact_start": "t", "rolsuper": False}]
+    conn = FakeConn(
+        [
+            ("l.mode = 'ExclusiveLock'", held),
+            ("rolsuper FROM pg_roles", False),
+            ("pg_terminate_backend", True),
+        ]
+    )
+
+    async def confirm() -> None:
+        pass
+
+    with pytest.raises(Refused) as e:
+        await apg.end_mode_transactions(conn, confirm)
+    (refusal,) = e.value.refusals
+    assert refusal.subject == "postgres backend 5"
+    assert "still holds loom.tenancy_mode's lock" in refusal.reason
+
+
+def _stub_attach(monkeypatch: pytest.MonkeyPatch, body: Any) -> None:
+    from contextlib import asynccontextmanager
+
+    from server.core import pg
+
+    @asynccontextmanager
+    async def dedicated(**_kw: Any) -> Any:
+        yield None
+
+    monkeypatch.setattr(pg, "dedicated", dedicated)
+    monkeypatch.setattr(cell_attach.Run, "run", body)
+
+
+@pytest.mark.asyncio
+async def test_a_router_refusal_of_attach_enforced_leaves_recording(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    async def refuse(_self: Any, path: str, _body: Any = None) -> dict[str, Any]:
+        raise Refused([Refusal("router", f"refused {path}")])
+
+    async def run(self: Any) -> int:
+        self.row, self.mode = {"deployment_id": "dep-1"}, "recording"
+        await self.commit_mode()
+        return 0
+
+    monkeypatch.setattr(cell_attach.Router, "call", refuse)
+    _stub_attach(monkeypatch, run)
+    assert await cell_attach.attach(None, _args(), httpx.URL("http://127.0.0.1:7900")) == 1
+    assert capsys.readouterr().err.splitlines()[-1] == "loom cell attach: the cell stays recording"
+
+
+@pytest.mark.asyncio
+async def test_a_durable_read_that_sees_recording_says_recording(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from server.core import pg_profile
+
+    async def synchronous() -> str:
+        return "synchronous"
+
+    async def read() -> apg.Durable:
+        return apg.Durable(mode="recording", first=(True, "first"), xid=1)
+
+    async def run(self: Any) -> int:
+        self.mode = "unknown"  # a mode commit whose outcome was lost
+        await self.durable()
+        return 0
+
+    monkeypatch.setattr(pg_profile, "standby_now", synchronous)
+    monkeypatch.setattr(apg, "durable_read", read)
+    _stub_attach(monkeypatch, run)
+    assert await cell_attach.attach(None, _args(), httpx.URL("http://127.0.0.1:7900")) == 1
+    assert capsys.readouterr().err.splitlines()[-1] == "loom cell attach: the cell stays recording"
+
+
+@pytest.mark.asyncio
+async def test_an_enforced_resume_refused_early_says_enforced(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from server.core import pg_profile
+
+    async def recorded(_ch: Any) -> dict[str, Any]:
+        return {"deployment_id": "other"}
+
+    async def health(_self: Any, _host: str) -> str:
+        return "dep-1"
+
+    async def read_mode(_conn: Any) -> tuple[str, Any]:
+        return "enforced", (True, "first")
+
+    async def run(self: Any) -> int:
+        self.row = {"is_first": True, "state": "attaching", "deployment_id": "dep-1"}
+        self.lock_conn = FakeConn([("FROM loom.authority", "dep-1")])
+        if refusals := await self.stores_refusals():
+            raise Refused(refusals)
+        return 0
+
+    monkeypatch.setattr(pg_profile, "recorded_authority", recorded)
+    monkeypatch.setattr(cell_attach.Router, "health", health)
+    monkeypatch.setattr(apg, "read_mode", read_mode)
+    _stub_attach(monkeypatch, run)
+    assert await cell_attach.attach(None, _args(), httpx.URL("http://127.0.0.1:7900")) == 1
+    err = capsys.readouterr().err.splitlines()
+    assert "clickhouse: records another deployment id" in err[0]
+    assert err[-1] == (
+        "loom cell attach: the cell stays enforced and attaching: rerun attach to resume"
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_interrupt_prints_the_mode_line_and_goes_on(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    async def run(self: Any) -> int:
+        self.mode = "unknown"
+        raise KeyboardInterrupt
+
+    _stub_attach(monkeypatch, run)
+    with pytest.raises(KeyboardInterrupt):
+        await cell_attach.attach(None, _args(), httpx.URL("http://127.0.0.1:7900"))
+    assert "the mode commit's outcome is unknown" in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
+async def test_the_stray_read_names_a_refused_table_and_reads_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from contextlib import asynccontextmanager
+
+    from server.cli import cell_ch, doctor_cell
+    from server.core import pg
+
+    async def topology(_ch: Any) -> Any:
+        return cell_ch.Topology("", 0)
+
+    async def no_tables(*_a: Any) -> tuple[list[Any], list[Any]]:
+        return [], []
+
+    async def sizes(*_a: Any) -> dict[str, int]:
+        return {}
+
+    pg_rows = [{"name": "loom.a_unindexed", "n": 1}, {"name": "loom.b_data", "n": 2}]
+    conn = FakeConn([("FROM loom.tenancy", []), ("pg_class c", pg_rows)])
+
+    @asynccontextmanager
+    async def dedicated(**_kw: Any) -> Any:
+        yield conn
+
+    async def pg_orgs(table: str, _budget: Any) -> list[str]:
+        if table == "loom.a_unindexed":
+            raise Refused([Refusal(f"postgres {table}", "has no plain btree index led by org")])
+        return ["stray-org"]
+
+    monkeypatch.setattr(cell_ch, "read_topology", topology)
+    monkeypatch.setattr(cell_scan, "list_clickhouse", no_tables)
+    monkeypatch.setattr(doctor_cell, "_table_sizes", sizes)
+    monkeypatch.setattr(pg, "dedicated", dedicated)
+    monkeypatch.setattr(cell_scan, "pg_orgs", pg_orgs)
+    lines = {n: (g, d) for n, g, d in await doctor_cell._stray_reads(None, 60)}
+    assert lines["cell_stray_orgs"] == ("WARN", "postgres loom.b_data: stray-org")
+    assert lines["cell_stray_orgs_unread"] == (
+        "WARN",
+        "not read: postgres loom.a_unindexed: has no plain btree index led by org",
+    )
+    assert "cell_stray_orgs_unchecked" not in lines

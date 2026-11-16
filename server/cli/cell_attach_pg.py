@@ -257,15 +257,16 @@ SELECT r.rolname AS role, w.why FROM login r, LATERAL (
 ORDER BY 1, 2
 """
 
-# The roles attach counts as its own: superusers, and a login role that itself owns
+# The roles attach counts as its own: superusers, a login role that itself owns
 # loom.tenancy, loom.tenancy_mode or a guarded table (it can drop or disable the
-# triggers, or lower the mode, whatever else it holds).
+# triggers, or lower the mode, whatever else it holds), and, for attach only, the role it
+# runs as ($2): the operator runs attach, while doctor may run as a CI or monitoring role.
 _OWN_ROLES = """
 SELECT rolname FROM pg_roles WHERE rolcanlogin AND (rolsuper OR oid IN (
     SELECT c.relowner FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE n.nspname = 'loom' AND c.relkind IN ('r', 'p')
       AND (c.relname IN ('tenancy', 'tenancy_mode') OR c.relname = ANY($1::text[]))
-)) OR rolname = current_user
+)) OR ($2 AND rolname = current_user)
 ORDER BY 1
 """
 
@@ -279,9 +280,11 @@ class Holders:
     others: dict[str, list[str]]
 
 
-async def privilege_holders(conn: Any) -> Holders:
+async def privilege_holders(conn: Any, *, exempt_self: bool) -> Holders:
+    """The holders of a right `_RIGHTS` counts; `exempt_self` counts the role this session
+    runs as among the own roles (attach's, not doctor's)."""
     guarded = [t for t in await cell_triggers.planned_tables(conn) if t != "tenancy"]
-    own = [str(r["rolname"]) for r in await conn.fetch(_OWN_ROLES, guarded)]
+    own = [str(r["rolname"]) for r in await conn.fetch(_OWN_ROLES, guarded, exempt_self)]
     others: dict[str, list[str]] = {}
     for r in await conn.fetch(_RIGHTS):
         if r["role"] not in own:
@@ -449,42 +452,49 @@ async def _ensure_table(
     conn: Any, table: str, deadlock_ms: int, wait: Wait, log: Callable[[str], None]
 ) -> Refusal | None:
     yielded = False
+    said = ""
     while True:
-        lock_ms = 100
+        most_ms = 100
         holders = await cell_triggers.holders(conn, table)
         if not yielded and any(h["backend_type"] == "autovacuum worker" for h in holders):
-            lock_ms, yielded = deadlock_ms + 500, True
-        lock_ms = wait.bound_ms(lock_ms)
-        result = "busy" if lock_ms <= 0 else await _ensure_one(conn, table, lock_ms, wait)
-        if result == "applied":
+            most_ms, yielded = deadlock_ms + 500, True
+        outcome = await _ensure_one(conn, table, most_ms, wait)
+        if outcome.answer == "applied":
             return None
-        if result == "denied":
+        if outcome.answer == "denied":
             return Refusal(
                 f"postgres loom.{table}",
                 "attach's role cannot alter it: make the role a member of its owner role",
             )
         if not await wait.pause():
             return _busy_refusal(table, await cell_triggers.holders(conn, table))
-        log(f"loom.{table}: its lock is busy; retrying")
+        # Said again only when the holders change: a retry a second is otherwise silent.
+        if outcome.holders != said:
+            said = outcome.holders
+            log(f"loom.{table}: its lock is busy ({said or 'no holder named'}); retrying")
 
 
-async def _ensure_one(conn: Any, table: str, lock_ms: int, wait: Wait) -> str:
-    """One try under the migration lock, whose own wait is bounded by what `wait` has left."""
+async def _ensure_one(conn: Any, table: str, most_ms: int, wait: Wait) -> cell_triggers.Outcome:
+    """One try under the migration lock: the migration lock's wait, and then the DDL's lock
+    wait (at most `most_ms`), each bounded by what `wait` has left when it starts."""
     from server.core.schema.pg_migrate import _LOCK_KEY
 
     migration_ms = wait.bound_ms(_MIGRATION_LOCK_MS)
     if migration_ms <= 0:
-        return "busy"
+        return cell_triggers.Outcome("busy")
     await conn.execute(f"SET lock_timeout = '{migration_ms}ms'")
     try:
         await conn.execute(_MIGRATION_LOCK, _LOCK_KEY)
     except Exception as e:
         if getattr(e, "sqlstate", None) == "55P03":
-            return "busy"  # a boot migrating: the next try
+            return cell_triggers.Outcome("busy")  # a boot migrating: the next try
         raise
     finally:
         await conn.execute("RESET lock_timeout")
     try:
+        lock_ms = wait.bound_ms(most_ms)
+        if lock_ms <= 0:
+            return cell_triggers.Outcome("busy")
         return await cell_triggers.ensure_table(
             conn, table, recording_first=True, lock_timeout=f"{lock_ms}ms", attempts=1
         )
@@ -522,6 +532,9 @@ WHERE l.locktype = 'relation' AND l.relation = 'loom.tenancy_mode'::regclass
 """
 
 _TIMED_OUT = frozenset({"55P03", "57014"})
+# How long attach waits for an ended mode transaction's lock to clear.
+_END_ROUNDS = 30  # not a setting: checks of the lock
+_END_PAUSE_S = 0.1  # not a setting: the pause between them
 
 
 async def commit_enforced(
@@ -585,10 +598,13 @@ async def _mode_try(conn: Any, lock_ms: int) -> bool:
 
 
 async def end_mode_transactions(conn: Any, confirm_lock: Callable[[], Any]) -> None:
-    """End an earlier run's mode transaction still in flight and wait until its lock
-    clears; Refused when its role is a superuser and attach's is not."""
-    for _ in range(30):
-        rows = await conn.fetch(_MODE_HOLDERS)
+    """End an earlier run's mode transaction still in flight and wait, for up to
+    `_END_ROUNDS` checks `_END_PAUSE_S` apart, until its lock clears; Refused when its role
+    is a superuser and attach's is not, or when a backend still holds the lock after the
+    last check, naming it."""
+    rows: list[Any] = []
+    for _ in range(_END_ROUNDS):
+        rows = list(await conn.fetch(_MODE_HOLDERS))
         if not rows:
             return
         superuser = bool(
@@ -608,7 +624,20 @@ async def end_mode_transactions(conn: Any, confirm_lock: Callable[[], Any]) -> N
                 )
             await confirm_lock()
             await conn.fetchval("SELECT pg_terminate_backend($1)", r["pid"])
-        await _sleep(0.1)
+        await _sleep(_END_PAUSE_S)
+    if not (rows := list(await conn.fetch(_MODE_HOLDERS))):
+        return
+    raise Refused(
+        [
+            Refusal(
+                f"postgres backend {r['pid']}",
+                f"still holds loom.tenancy_mode's lock after it was ended "
+                f"({r['application_name'] or 'no name'}, since {r['xact_start']}): rerun attach "
+                "once it has gone",
+            )
+            for r in rows
+        ]
+    )
 
 
 # -- the durable read -------------------------------------------------------------------

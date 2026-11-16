@@ -180,7 +180,7 @@ def _stopped(out: Verdict, b: Beat, what: str, stopped_unset: StoppedUnset) -> N
     )
 
 
-def final_refusals(verdict: Verdict, *, scim_ok: bool = False) -> list[Refusal]:
+def final_refusals(verdict: Verdict) -> list[Refusal]:
     out = []
     if not verdict.live and not verdict.booting:
         out.append(Refusal("processes", "no live process of this cell reports a heartbeat"))
@@ -192,7 +192,7 @@ def final_refusals(verdict: Verdict, *, scim_ok: bool = False) -> list[Refusal]:
                 "finish the root-secret rollout first",
             )
         )
-    if verdict.scim and not scim_ok:
+    if verdict.scim:
         out.append(
             Refusal("processes", "SCIM is on: attach with SCIM on needs the per-cell SCIM release")
         )

@@ -95,7 +95,7 @@ async def _writer_reads(allowed_roles: tuple[str, ...]) -> list[tuple[str, str, 
     from server.core import pg
 
     async with pg.dedicated(statement_timeout_ms=_STATEMENT_MS) as conn:
-        holders = await cell_attach_pg.privilege_holders(conn)
+        holders = await cell_attach_pg.privilege_holders(conn, exempt_self=False)
         unchecked = await cell_attach_pg.unmarked_refusals(conn, False)
     roles = cell_attach_pg.privilege_refusals(holders, allowed_roles)
     return [

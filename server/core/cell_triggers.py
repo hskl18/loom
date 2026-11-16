@@ -21,7 +21,7 @@ import asyncio
 import dataclasses
 import logging
 import re
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 from server.core import cell, pg, readiness
 
@@ -94,6 +94,14 @@ WHERE l.relation = $1::regclass AND l.pid <> pg_backend_pid()
 
 # What a table's DDL came to (`ensure_table`, `_run_ddl`).
 Applied = Literal["applied", "busy", "denied"]
+
+
+class Outcome(NamedTuple):
+    """A table's DDL's answer, and with `busy` the sessions it waited behind."""
+
+    answer: Applied
+    holders: str = ""
+
 
 # pg_trigger.tgtype bits (src/include/catalog/pg_trigger.h).
 _ROW, _BEFORE, _INSERT, _UPDATE, _INSTEAD = 1, 2, 4, 16, 64
@@ -265,14 +273,15 @@ async def ensure_table(
     recording_first: bool = False,
     lock_timeout: str = LOCK_TIMEOUT,
     attempts: int = LOCK_ATTEMPTS,
-) -> Applied:
+) -> Outcome:
     """`ensure` for one table of the planned set (`loom.tenancy` its guard, any other its
     org triggers), so one table's DDL can run alone: in `enforced`, or with
     `recording_first` also in a first cell's `recording`, where the org triggers' function
     passes every row and a boot never creates them. `applied` when the DDL ran or nothing
     was needed, `busy` when its lock was not taken in `attempts` tries of `lock_timeout`,
-    `denied` when this role cannot alter the table. Raises for a table outside the planned
-    set, or in another state."""
+    `denied` when this role cannot alter the table; a `busy` answer carries the sessions it
+    waited behind and logs nothing, so the caller says it as often as it retries. Raises
+    for a table outside the planned set, or in another state."""
     state = await cell.read_state(conn)
     if state != "enforced" and not (recording_first and state == "recording"):
         raise RuntimeError(f"cell triggers: not created in state {state!r}")
@@ -284,8 +293,8 @@ async def ensure_table(
     ((_, names),) = planned
     sqls = _table_statements(table, names, await _triggers(conn, names))
     if not sqls:
-        return "applied"
-    return await _run_ddl(conn, table, sqls, lock_timeout, attempts)
+        return Outcome("applied")
+    return await _run_ddl(conn, table, sqls, lock_timeout, attempts, warn=False)
 
 
 def _table_statements(
@@ -308,11 +317,14 @@ async def _run_ddl(
     sqls: list[str],
     lock_timeout: str = LOCK_TIMEOUT,
     attempts: int = LOCK_ATTEMPTS,
-) -> Applied:
+    *,
+    warn: bool = True,
+) -> Outcome:
     """A table's DDL in one transaction, `attempts` short tries: `applied`, or which of the
-    two causes cells.md names kept it from applying (`busy`: its lock not taken; `denied`:
-    a table this role cannot alter), which a boot serves past; any other error fails it, as
-    a failed read of the state does."""
+    two causes cells.md names kept it from applying (`busy`: its lock not taken, with the
+    sessions it waited behind; `denied`: a table this role cannot alter), which a boot
+    serves past; any other error fails it, as a failed read of the state does. `warn` logs
+    a busy table once, after its last try, with its DDL and holders (a boot's `ensure`)."""
     import asyncpg
 
     for attempt in range(attempts):
@@ -321,25 +333,28 @@ async def _run_ddl(
                 await conn.execute(f"SET LOCAL lock_timeout = '{lock_timeout}'")
                 for sql in sqls:
                     await conn.execute(sql)
-            return "applied"
+            return Outcome("applied")
         except asyncpg.exceptions.InsufficientPrivilegeError as e:
             log.warning(
                 "cell triggers: not applied on loom.%s (%s): this role cannot alter it", table, e
             )
-            return "denied"
+            return Outcome("denied")
         except asyncpg.exceptions.LockNotAvailableError as e:
             # Short tries outlast a short transaction; an autovacuum is left to finish.
             if attempt < attempts - 1:
                 await asyncio.sleep(LOCK_RETRY_S)
                 continue
-            log.warning(
-                "cell triggers: not applied on loom.%s (%s): %s; %s",
-                table,
-                e,
-                "; ".join(sqls),
-                await _holders(conn, table),
-            )
-    return "busy"
+            held = await _holders(conn, table)
+            if warn:
+                log.warning(
+                    "cell triggers: not applied on loom.%s (%s): %s; %s",
+                    table,
+                    e,
+                    "; ".join(sqls),
+                    held,
+                )
+            return Outcome("busy", held)
+    return Outcome("busy")
 
 
 async def holders(conn: Any, table: str) -> list[Any]:

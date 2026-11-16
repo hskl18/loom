@@ -532,7 +532,7 @@ async def test_each_right_that_makes_an_org_held_is_named(
             await conn.execute("GRANT USAGE ON SCHEMA loom TO " + role)
             for sql in grant.format(r=role, owner=owner).split("; "):
                 await conn.execute(sql)
-            holders = await cell_attach_pg.privilege_holders(conn)
+            holders = await cell_attach_pg.privilege_holders(conn, exempt_self=True)
         assert owner in holders.own
         assert any(why in w for w in holders.others.get(role, [])), holders.others
     finally:
@@ -550,7 +550,7 @@ async def test_a_function_owner_counts_though_it_owns_no_table(cell_stores) -> N
     try:
         async with pg.dedicated() as conn:
             await conn.execute(f"ALTER FUNCTION loom.tenancy_refuse_unheld() OWNER TO {role}")
-            holders = await cell_attach_pg.privilege_holders(conn)
+            holders = await cell_attach_pg.privilege_holders(conn, exempt_self=True)
             await conn.execute("ALTER FUNCTION loom.tenancy_refuse_unheld() OWNER TO CURRENT_USER")
         assert holders.others[role] == ["owns loom.tenancy_refuse_unheld()"]
     finally:
@@ -631,8 +631,40 @@ async def test_doctor_names_stray_orgs_smallest_tables_first(cell_stores) -> Non
     lines = {n: (g, d) for n, g, d in await doctor_cell._stray_reads(stores["ch"], 300)}
     grade, detail = lines["cell_stray_orgs"]
     assert grade == "WARN" and tag + "stray" in detail and tag + "held" not in detail
-    tight = {n: (g, d) for n, g, d in await doctor_cell._stray_reads(stores["ch"], 0.001)}
-    assert tight["cell_stray_orgs_unchecked"][0] == "WARN"
+
+
+@pytest.mark.asyncio
+async def test_doctor_reads_smallest_first_and_leaves_the_largest_unchecked(
+    cell_stores, monkeypatch
+) -> None:
+    from server.cli import cell_scan, doctor_cell
+
+    stores = cell_stores
+    await _prepare(stores, _Network())
+    tag = stores["tag"]
+    await pg.execute("CREATE TABLE loom.it_small (org text PRIMARY KEY)")
+    await pg.execute("CREATE TABLE loom.it_large (org text PRIMARY KEY)")
+    await pg.execute("INSERT INTO loom.it_small VALUES ($1)", tag + "small")
+    await pg.execute(
+        "INSERT INTO loom.it_large SELECT $1 || g FROM generate_series(1, 20000) g", tag + "l"
+    )
+    await pg.execute("ANALYZE loom.it_small, loom.it_large")
+    # The budget runs out on the largest table, as it does on a real cell when that table's
+    # read is what is too slow: every smaller one was read first.
+    real, read = cell_scan.pg_orgs, []
+
+    async def pg_orgs(table: str, budget: Any) -> list[str]:
+        read.append(table)
+        if table == "loom.it_large":
+            await asyncio.sleep(budget.left() + 0.1)
+        return await real(table, budget)
+
+    monkeypatch.setattr(cell_scan, "pg_orgs", pg_orgs)
+    lines = {n: (g, d) for n, g, d in await doctor_cell._stray_reads(stores["ch"], 3)}
+    assert read[-1] == "loom.it_large" and "loom.it_small" in read
+    assert tag + "small" in lines["cell_stray_orgs"][1]
+    grade, detail = lines["cell_stray_orgs_unchecked"]
+    assert grade == "WARN" and detail.endswith(": loom.it_large")
 
 
 @pytest.mark.asyncio
@@ -657,10 +689,10 @@ async def test_a_role_with_the_grants_but_not_the_owner_role_is_refused_before_a
             assert "attach's role lacks membership in the owner role of loom.tenancy" in lacking
             assert any("loom.scope_generations" in r for r in lacking)
             # The trigger pass tells the cause apart: denied, not a busy lock.
-            assert (
-                await cell_triggers.ensure_table(conn, "scope_generations", recording_first=True)
-                == "denied"
+            outcome = await cell_triggers.ensure_table(
+                conn, "scope_generations", recording_first=True
             )
+            assert outcome.answer == "denied"
             await conn.execute("RESET ROLE")
             assert await _mode() == "recording"
     finally:
@@ -688,3 +720,28 @@ async def test_doctor_names_a_table_it_cannot_read_and_reads_the_rest(cell_store
     grade, detail = lines["cell_stray_orgs_unread"]
     assert grade == "WARN" and "postgres loom.it_no_org_index" in detail
     assert "cell_stray_orgs_unchecked" not in lines
+
+
+@pytest.mark.asyncio
+async def test_attach_exempts_the_role_it_runs_as_and_doctor_does_not(cell_stores) -> None:
+    await _prepare(cell_stores, _Network())
+    role = f"it_ci_{uuid.uuid4().hex[:6]}"
+    await _admin(f"CREATE ROLE {role} LOGIN")
+    try:
+        async with pg.dedicated() as conn:
+            await conn.execute(f"GRANT USAGE ON SCHEMA loom TO {role}")
+            await conn.execute(f"GRANT SELECT ON ALL TABLES IN SCHEMA loom TO {role}")
+            await conn.execute(f"GRANT INSERT ON loom.tenancy TO {role}")
+            await conn.execute(f"SET ROLE {role}")
+            as_attach = await cell_attach_pg.privilege_holders(conn, exempt_self=True)
+            as_doctor = await cell_attach_pg.privilege_holders(conn, exempt_self=False)
+            await conn.execute("RESET ROLE")
+        # Attach runs as the operator's role; a CI role doctor runs as is warned about.
+        assert role in as_attach.own and role not in as_attach.others
+        assert role not in as_doctor.own
+        assert "may insert into loom.tenancy" in as_doctor.others[role]
+    finally:
+        async with pg.dedicated() as conn:
+            await conn.execute(f"DROP OWNED BY {role}")
+        await _admin(f"DROP OWNED BY {role}")
+        await _admin(f"DROP ROLE {role}")

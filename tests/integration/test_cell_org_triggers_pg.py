@@ -722,15 +722,15 @@ async def test_ensure_table_creates_a_recording_first_cells_triggers_only_when_a
         with pytest.raises(RuntimeError, match="recording"):
             await cell_triggers.ensure_table(conn, "scope_generations")
         ensure = cell_triggers.ensure_table
-        assert await ensure(conn, "scope_generations", recording_first=True) == "applied"
-        assert await ensure(conn, "tenancy", recording_first=True) == "applied"
+        assert (await ensure(conn, "scope_generations", recording_first=True)).answer == "applied"
+        assert (await ensure(conn, "tenancy", recording_first=True)).answer == "applied"
         assert await _cell_triggers(conn) == {
             ("scope_generations", "tenancy_insert", "O"),
             ("scope_generations", "tenancy_update", "O"),
             ("tenancy", "tenancy_record", "O"),
         }
         # Again: nothing to do.
-        assert await ensure(conn, "scope_generations", recording_first=True) == "applied"
+        assert (await ensure(conn, "scope_generations", recording_first=True)).answer == "applied"
         with pytest.raises(ValueError, match="no cell triggers"):
             await cell_triggers.ensure_table(conn, "idempotency", recording_first=True)
         plain = await _unmarked(dsn)

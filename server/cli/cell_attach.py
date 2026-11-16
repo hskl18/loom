@@ -282,6 +282,8 @@ class Run:
         if recorded is None or str(recorded["deployment_id"]) != expected:
             out.append(Refusal("clickhouse", f"records another deployment id than {expected!r}"))
         state, first = await apg.read_mode(self.lock_conn)
+        if state in cell.MODES:
+            self.mode = state  # what a refusal from here on leaves the cell at
         if first != (True, self.name):
             out.append(
                 Refusal("postgres loom.cell_first", f"reads {first}, not (true, {self.name})")
@@ -353,7 +355,7 @@ class Run:
 
     async def catalog_refusals(self) -> list[Refusal]:
         """The Postgres checks that run again before the mode commit and in step 4."""
-        holders = await apg.privilege_holders(self.lock_conn)
+        holders = await apg.privilege_holders(self.lock_conn, exempt_self=True)
         self.report["own_roles"] = holders.own
         out = apg.privilege_refusals(holders, self.args.pg_allow_role)
         out += await apg.unmarked_refusals(self.lock_conn, await apg.session_passes())
@@ -450,9 +452,9 @@ class Run:
     async def commit_mode(self) -> None:
         from server.core import pg
 
-        # From here on the mode may have risen: only the durable read can say.
-        self.mode = "unknown"
         await self.router.call("/attach/enforced", {"deployment_id": self.row["deployment_id"]})
+        # From the mode transaction on the mode may have risen: only the durable read can say.
+        self.mode = "unknown"
         try:
             async with pg.dedicated(statement_timeout_ms=_LOCK_STATEMENT_MS) as conn:
                 await apg.commit_enforced(
@@ -491,6 +493,8 @@ class Run:
                 if await pg_profile.standby_now() != "synchronous":
                     raise _refused("postgres standbys", "not synchronous after the durable read")
                 break
+        if read.mode in cell.MODES:
+            self.mode = read.mode
         if read.first != (True, self.name) or read.mode != "enforced":
             raise _refused(
                 "postgres cell state",
@@ -666,9 +670,7 @@ class Run:
             )
         if out:
             raise Refused(out)
-        verdict = await self.check_beats("refuse")
-        if refusals := beats.final_refusals(verdict):
-            raise Refused(refusals)
+        await self.check_beats("refuse")
 
     async def dry_run(self, topology: Any, listed: cell_scan.TableList) -> int:
         found = await self.scan(topology, listed)
@@ -711,6 +713,10 @@ async def attach(
         log(f"stopped ({type(e).__name__}: {e}); run it again")
         log(mode_line(run.mode))
         return 1
+    except BaseException:
+        # An interrupt: the mode line, then the interrupt as it came.
+        log(mode_line(run.mode))
+        raise
     run.report["seconds"] = round(time.monotonic() - started, 1)
     print(json.dumps(run.report, indent=2, sort_keys=True, default=str))
     return code
