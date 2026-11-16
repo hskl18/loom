@@ -356,8 +356,8 @@ async def run_sync(
     states = await _states(usable)
     mirrored = [s for s in usable if mirror_synced(s)]
     if mirrored:
-        # Until a third of the pass, so the namespace sources keep two thirds or more of
-        # the pass's own budget, and their document bound is their own.
+        # Until a third of the pass's start window; the namespace sources then have the
+        # rest of the pass's own budget, and their document bound is their own.
         await _sync_mirrored(mirrored, states, run.budget, result)
     usable = [s for s in usable if not mirror_synced(s)]
     asked = sorted(
@@ -1867,6 +1867,7 @@ __all__ = [
     "full_due",
     "give_up",
     "index_with_room",
+    "mirror_state",
     "open_listing",
     "ours",
     "require_current",

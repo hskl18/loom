@@ -296,3 +296,23 @@ def test_a_turn_that_reads_every_list_mid_cycle_lands_its_own_start_and_ends_the
     _turn_with(world, slow_lists, 0)  # time for every list
     assert slow_lists["rows"][-1] > began
     assert (_own(world)["lists_cursor"], _own(world)["lists_since"]) == ("", "")
+
+
+def test_a_turn_whose_list_reads_stop_still_retires_a_gone_file_at_the_full_interval(
+    world: Any, mirror: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world.files = _files(4)
+    _pass(world, _mirrored())  # each list read with its write
+
+    class _Spent(PassBudget):
+        def exhausted(self) -> bool:
+            return True  # the list reads' half of the leg is gone at once
+
+    monkeypatch.setattr(source_sync_mirror, "PassBudget", _Spent)
+    # A full sync asked for, and doc4 gone from the store.
+    asked = {"requested_at": "t", "full": True}
+    world.states["decks"] = {"state_value": "", "detail": json.dumps(asked)}
+    world.files = _files(3)
+    result = _pass(world, _mirrored())
+    assert result.removed == 1 and not any("/doc4/" in uri for uri in world.docs)
+    assert "full_listed_at" in _own(world) and _own(world)["lists_cursor"]

@@ -39,6 +39,7 @@ from server.code.app.index.pass_budget import PassBudget
 from server.core.ch import sequential_reads
 from server.core.pg_lease import PublicationPending
 from server.knowledge.app import mirrors
+from server.knowledge.app import source_gdrive_items as gdrive_items
 from server.knowledge.app import source_sync as sync
 from server.knowledge.domain import access_list
 from server.knowledge.domain.sources import (
@@ -110,7 +111,7 @@ async def _own_state(src: KnowledgeSource, mirror: str, asked: dict[str, Any]) -
 
 async def _in_mirror(
     src: KnowledgeSource,
-    opened: tuple[str, Any, list[dict[str, Any]]],
+    opened: tuple[str, gdrive_items.Listing, list[dict[str, Any]]],
     detail: dict[str, Any],
     started: datetime,
     run: sync.Pass,
@@ -270,8 +271,9 @@ async def _refresh_lists(
                     continue  # an incomplete search may have missed it: it keeps its list
                 if f is not None and "permissions" not in f and lists_budget.exhausted():
                     # Past the lists' half of the share no list is read, but every one
-                    # that needs no read is still compared; this one keeps its list.
-                    result.mark(sync.TurnMark.PASS_BOUND)
+                    # that needs no read is still compared; this one keeps its list. The
+                    # cursor carries the cut, so the turn stays complete: retirement and
+                    # the full interval do not wait on a source's lists fitting one turn.
                     stopped_at = stopped_at or uri
                     continue
                 access = access_list.UNREAD if f is None else await _file_access(token, f, result)
@@ -289,6 +291,8 @@ async def _refresh_lists(
             # A listing must not vouch for a list it could not write; later batches go on.
             _note(result, "permissions: a stored copy is not this source's to write")
             all_written = False
+    if stopped_at is not None:
+        _note(result, "permissions: the lists go on from a cursor next turn")
     return all_written, stopped_at
 
 

@@ -273,7 +273,8 @@ def test_lists_read_before_the_pass_runs_out_are_written_and_no_listing_row_land
     result = _turn(world, _mirrored())
     [row] = mirror["rewrites"]  # the one list read before the deadline
     assert access_list.from_json(row["access_json"]) == access_list.AccessList()
-    assert result.cut and len(world.upserts) == 2 and len(mirror["listings"]) == listings
+    assert _own(world)["lists_cursor"] and len(world.upserts) == 2
+    assert len(mirror["listings"]) == listings
 
 
 def test_a_rate_limit_on_a_stored_copy_s_list_stops_the_turn_before_any_fetch(
@@ -638,7 +639,7 @@ def test_a_cut_in_a_later_batch_keeps_the_earlier_batches_writes(
     listings = len(mirror["listings"])
     result = _turn(world, _mirrored())
     narrowed = sorted(r["source_uri"] for r in mirror["rewrites"])
-    assert result.cut and narrowed == sorted(world.docs)[:2]  # batches one and two
+    assert _own(world)["lists_cursor"] and narrowed == sorted(world.docs)[:2]  # batches 1, 2
     assert len(mirror["listings"]) == listings
 
 
@@ -667,7 +668,7 @@ def test_past_the_deadline_a_list_the_listing_carried_is_still_written(
     [row] = mirror["rewrites"]
     assert row["source_uri"].split("/")[-2] == "doc2"
     assert access_list.from_json(row["access_json"]) == access_list.AccessList()
-    assert result.cut and len(mirror["listings"]) == listings
+    assert _own(world)["lists_cursor"] and len(mirror["listings"]) == listings
 
 
 def test_a_mirrored_source_without_a_mirror_turn_is_refused_a_turn() -> None:
