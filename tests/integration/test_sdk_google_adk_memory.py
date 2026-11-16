@@ -189,7 +189,9 @@ async def test_each_turn_saved_in_one_session_keeps_its_passage(agent) -> None:
     assert await passage("garage door teal", "garage door")
 
 
-async def test_a_users_delete_reaches_their_fact_when_another_user_holds_its_key(agent) -> None:
+async def test_a_users_delete_reaches_their_fact_when_another_user_holds_its_key(
+    agent, require_fake_llm
+) -> None:
     """Extracted keys are concept names two users share; the entry id carries the
     session, so Alice's delete reaches her row and leaves Bob's."""
     service = LoomMemoryService(agent, app_name="travel", honour_abstain=False, defer=False)

@@ -33,8 +33,8 @@ service a ``Runner`` takes as ``memory_service=``. ADK's memory tools read it:
 
 ADK scopes memory by app and user. Loom's boundary is the namespace, so a
 service serves one ADK app, the namespace of its Loom agent, and refuses a
-call for another app; the ADK user is the Loom ``user_id``, and extraction
-runs under a Loom session derived from the user and the ADK session. Install with
+call for another app; the ADK user is the Loom ``user_id``, and extraction runs
+under a Loom session derived from the user and the ADK session. Install with
 ``pip install 'clickhouse-loom[google-adk]'``.
 """
 
@@ -236,12 +236,14 @@ def _entry_id(memory_key: str, session_id: str) -> str:
 
 def _parse_entry_id(memory_id: str) -> tuple[str, str]:
     try:
-        key, session = json.loads(memory_id)
-    except (ValueError, TypeError) as e:
-        raise ValueError(f"{memory_id!r} is not an id this service's search returned") from e
-    if not (isinstance(key, str) and isinstance(session, str)):
+        parsed = json.loads(memory_id)
+    except ValueError:
+        parsed = None
+    if not (
+        isinstance(parsed, list) and len(parsed) == 2 and all(isinstance(p, str) for p in parsed)
+    ):
         raise ValueError(f"{memory_id!r} is not an id this service's search returned")
-    return key, session
+    return parsed[0], parsed[1]
 
 
 def _loom_session(user_id: str, session_id: str) -> str:

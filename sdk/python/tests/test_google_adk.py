@@ -372,8 +372,11 @@ def test_delete_memory_deletes_the_key_and_skips_an_entry_without_one() -> None:
     asyncio.run(service.delete_memory(app_name="travel", user_id="alice"))
     # The session is sent: by key alone the delete finds the key's newest row, any user's.
     assert fake.calls == [("delete", ("user_seat",), {"user_id": "alice", "session_id": "adk-1"})]
-    with pytest.raises(ValueError, match="not an id"):
-        asyncio.run(service.delete_memory(app_name="travel", user_id="alice", memory_id="adk/1"))
+    for not_an_id in ("adk/1", '"ab"', '{"k": "s", "x": "y"}', '["k"]', '["k", 1]'):
+        with pytest.raises(ValueError, match="not an id"):
+            asyncio.run(
+                service.delete_memory(app_name="travel", user_id="alice", memory_id=not_an_id)
+            )
 
 
 def test_the_loom_session_is_per_user_and_unambiguous() -> None:
