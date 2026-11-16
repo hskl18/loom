@@ -34,13 +34,14 @@ service a ``Runner`` takes as ``memory_service=``. ADK's memory tools read it:
 ADK scopes memory by app and user. Loom's boundary is the namespace, so a
 service serves one ADK app, the namespace of its Loom agent, and refuses a
 call for another app; the ADK user is the Loom ``user_id``, and extraction
-runs under the Loom session ``<user>/<ADK session id>``. Install with
+runs under a Loom session derived from the user and the ADK session. Install with
 ``pip install 'clickhouse-loom[google-adk]'``.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -100,7 +101,7 @@ class LoomMemoryService(BaseMemoryService):
         self._key_prefix = key_prefix
 
     async def add_session_to_memory(self, session: Session) -> None:
-        self._check(session.app_name, session.user_id)
+        self._check_scope(session.app_name, session.user_id)
         await self._extract(session.user_id, session.id, get_active_events(session.events))
 
     async def add_events_to_memory(
@@ -112,7 +113,7 @@ class LoomMemoryService(BaseMemoryService):
         session_id: str | None = None,
         custom_metadata: Mapping[str, object] | None = None,
     ) -> None:
-        self._check(app_name, user_id)
+        self._check_scope(app_name, user_id)
         if not session_id:
             # Loom files a turn's verbatim chunks by session alone, not by user.
             raise ValueError("add_events_to_memory needs the ADK session_id")
@@ -126,7 +127,7 @@ class LoomMemoryService(BaseMemoryService):
         memories: Sequence[MemoryEntry],
         custom_metadata: Mapping[str, object] | None = None,
     ) -> None:
-        self._check(app_name, user_id)
+        self._check_scope(app_name, user_id)
         for memory in memories:
             text = _text(memory.content)
             if not text:
@@ -143,7 +144,7 @@ class LoomMemoryService(BaseMemoryService):
     async def search_memory(
         self, *, app_name: str, user_id: str, query: str
     ) -> SearchMemoryResponse:
-        self._check(app_name, user_id)
+        self._check_scope(app_name, user_id)
         if not query.strip():
             return SearchMemoryResponse()
         result = await self._agent.memory.search(
@@ -166,8 +167,9 @@ class LoomMemoryService(BaseMemoryService):
         return SearchMemoryResponse(
             memories=[
                 MemoryEntry(
-                    # Only a memory has a key memory.delete takes.
-                    id=hit.memory_key if hit.source == "fact" else None,
+                    # The key memory.delete takes: a memory's, or for a passage of a long
+                    # value the key it was written under; a conversation's chunks have none.
+                    id=hit.memory_key if hit.source == "fact" else (hit.parent_memory_key or None),
                     content=types.Content(
                         role="user", parts=[types.Part(text=hit.content_excerpt)]
                     ),
@@ -182,12 +184,11 @@ class LoomMemoryService(BaseMemoryService):
     async def delete_memory(
         self, *, app_name: str, user_id: str, memory_id: str | None = None
     ) -> None:
-        self._check(app_name, user_id)
-        if not memory_id:
-            raise ValueError("delete_memory needs the memory_id a search returned")
-        await self._agent.memory.delete(memory_id, user_id=user_id)
+        self._check_scope(app_name, user_id)
+        if memory_id:  # an entry with no id has nothing a key deletes, as in ADK's own service
+            await self._agent.memory.delete(memory_id, user_id=user_id)
 
-    def _check(self, app_name: str, user_id: str) -> None:
+    def _check_scope(self, app_name: str, user_id: str) -> None:
         # Loom merges a write into a matching memory of the namespace whichever agent
         # wrote it, so two apps in one namespace would share and lose memories.
         if app_name != self._app_name:
@@ -215,10 +216,16 @@ class LoomMemoryService(BaseMemoryService):
             await self._agent.memory.set_from_messages(
                 messages,
                 user_id=user_id,
-                # ADK makes a session id unique per user only; Loom files chunks by session alone.
-                session_id=f"{user_id}/{session_id}",
+                session_id=_loom_session(user_id, session_id),
                 defer=self._defer,
             )
+
+
+def _loom_session(user_id: str, session_id: str) -> str:
+    """The Loom session of an ADK user's session: ADK makes a session id unique per
+    user only, and Loom files a turn's verbatim chunks by session alone."""
+    pair = json.dumps([user_id, session_id])
+    return f"adk-{hashlib.sha256(pair.encode()).hexdigest()[:20]}"
 
 
 def _iso_time(text: str | None) -> datetime | None:

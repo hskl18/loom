@@ -23,7 +23,7 @@ from google.adk.sessions import InMemorySessionService, Session
 from google.adk.tools import load_memory, preload_memory
 from google.genai import types
 from loom import Agent, SyncAgent
-from loom.integrations.google_adk import LoomMemoryService
+from loom.integrations.google_adk import LoomMemoryService, _loom_session
 from loom.memory import MemorySearchHit, MemorySearchResult
 from pydantic import Field
 
@@ -216,7 +216,11 @@ def test_a_saved_session_goes_to_extraction() -> None:
     ]
     assert all(str(m["timestamp"]).endswith("+00:00") for m in messages)
     # The session keys Loom's evidence of the turns.
-    assert extract[2] == {"user_id": "alice", "session_id": f"alice/{session.id}", "defer": True}
+    assert extract[2] == {
+        "user_id": "alice",
+        "session_id": _loom_session("alice", session.id),
+        "defer": True,
+    }
 
 
 def test_the_documented_turn_callback_sends_each_turn_once() -> None:
@@ -241,7 +245,7 @@ def test_the_documented_turn_callback_sends_each_turn_once() -> None:
     sent = [[m["content"] for m in c[1][0]] for c in calls]
     assert sent == [["I prefer aisle seats", "Noted."], ["I fly to Lisbon", "Lisbon, then."]]
     # ADK's context passes the session; Loom's session is per user.
-    assert [c[2]["session_id"] for c in calls] == [f"alice/{session.id}"] * 2
+    assert [c[2]["session_id"] for c in calls] == [_loom_session("alice", session.id)] * 2
 
 
 def test_extraction_leaves_out_thoughts_tool_calls_and_rewound_turns() -> None:
@@ -289,13 +293,14 @@ def test_events_given_leave_out_a_turn_rewound_among_them() -> None:
     ]
     fake = _FakeMemory()
     asyncio.run(
-        _service(fake).add_events_to_memory(
+        _service(fake, defer=False).add_events_to_memory(
             app_name="travel", user_id="alice", events=events, session_id="s1"
         )
     )
     ((_, (messages,), kw),) = fake.calls
     assert [m["content"] for m in messages] == ["I live in Lisbon"]
-    assert kw["session_id"] == "alice/s1"
+    assert kw["session_id"] == _loom_session("alice", "s1")
+    assert kw["defer"] is False  # extraction inline, as the service was built
 
 
 def test_events_without_text_send_nothing() -> None:
@@ -349,13 +354,19 @@ def test_a_timestamp_that_is_not_iso_is_no_valid_at() -> None:
     assert kw["valid_at"] is None
 
 
-def test_delete_memory_deletes_the_key_and_needs_one() -> None:
+def test_delete_memory_deletes_the_key_and_skips_an_entry_without_one() -> None:
     fake = _FakeMemory()
     service = _service(fake)
     asyncio.run(service.delete_memory(app_name="travel", user_id="alice", memory_id="adk/1"))
+    asyncio.run(service.delete_memory(app_name="travel", user_id="alice"))
     assert fake.calls == [("delete", ("adk/1",), {"user_id": "alice"})]
-    with pytest.raises(ValueError, match="memory_id"):
-        asyncio.run(service.delete_memory(app_name="travel", user_id="alice"))
+
+
+def test_the_loom_session_is_per_user_and_unambiguous() -> None:
+    assert _loom_session("alice", "main") != _loom_session("bob", "main")
+    assert _loom_session("a/b", "c") != _loom_session("a", "b/c")
+    assert _loom_session("alice", "main") == _loom_session("alice", "main")
+    assert ":" not in _loom_session("a:b", "c")  # Loom's chunk keys are `chunk:<session>:<n>`
 
 
 def test_a_call_for_another_app_is_refused() -> None:
@@ -377,14 +388,16 @@ def test_a_call_for_another_app_is_refused() -> None:
 def test_an_entry_id_is_the_key_delete_memory_deletes() -> None:
     hits = [
         _hit("adk/1", "a fact"),
-        _hit("chunk:s1:0", "a turn", source="chunk", parent_memory_key="adk/1"),
+        _hit("chunk:adk/1:0", "a passage", source="chunk", parent_memory_key="adk/1"),
+        _hit("chunk:s1:0", "a turn", source="chunk"),
         _hit("summary:s1", "a session", source="summary"),
     ]
     found = asyncio.run(
         _service(_FakeMemory(hits)).search_memory(app_name="travel", user_id="u", query="q")
     )
-    assert [m.id for m in found.memories] == ["adk/1", None, None]
-    assert [m.custom_metadata["source"] for m in found.memories] == ["fact", "chunk", "summary"]
+    assert [m.id for m in found.memories] == ["adk/1", "adk/1", None, None]
+    sources = ["fact", "chunk", "chunk", "summary"]
+    assert [m.custom_metadata["source"] for m in found.memories] == sources
 
 
 def test_without_google_adk_the_import_names_the_extra(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -424,7 +437,7 @@ def test_a_real_agent_posts_the_service_calls() -> None:
         "full",
         False,
     )
-    assert (extract["user_id"], extract["session_id"]) == ("alice", "alice/s1")
+    assert (extract["user_id"], extract["session_id"]) == ("alice", _loom_session("alice", "s1"))
     assert [m["content"] for m in extract["messages"]] == ["I prefer aisle seats"]
     assert write["memory_key"].startswith("adk/") and write["user_id"] == "alice"
 
