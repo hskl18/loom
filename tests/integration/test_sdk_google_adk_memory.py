@@ -105,12 +105,16 @@ async def test_add_memory_then_delete_by_id(agent) -> None:
     assert memory_id is not None
     row = await agent.memory.get(memory_id, user_id="alice")
     assert row is not None
-    assert (row["value"], row["agent"], row["user_id"], row["session_id"]) == (
+    fields = ("value", "agent", "user_id", "session_id", "memory_type", "source_class", "tags")
+    assert [row[f] for f in fields] == [
         "Alice prefers aisle seats",
         agent.agent,
         "alice",
         "-",
-    )
+        "semantic",
+        "asserted",
+        [],
+    ]
     assert row["valid_at"].startswith("2026-03-01")
     await service.delete_memory(app_name="travel", user_id="bob", memory_id=memory_id)
     assert await ids("alice") == [memory_id]  # another user's delete reaches nothing

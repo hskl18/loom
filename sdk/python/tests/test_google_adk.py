@@ -75,6 +75,10 @@ def _hit(key: str, text: str, **kw: Any) -> MemorySearchHit:
     )
 
 
+def _user(text: str) -> types.Content:
+    return types.Content(role="user", parts=[types.Part(text=text)])
+
+
 def _model(text: str) -> types.Content:
     return types.Content(role="model", parts=[types.Part(text=text)])
 
@@ -222,7 +226,7 @@ def test_the_documented_turn_callback_sends_each_turn_once() -> None:
         await ctx.add_events_to_memory(events=turn)
 
     llm = _ScriptedLlm(script=[_model("Noted."), _model("Lisbon, then.")])
-    asyncio.run(
+    sessions = asyncio.run(
         _run(
             _service(fake),
             llm,
@@ -231,8 +235,12 @@ def test_the_documented_turn_callback_sends_each_turn_once() -> None:
             after_agent_callback=save_turn,
         )
     )
-    sent = [[m["content"] for m in c[1][0]] for c in fake.calls if c[0] == "set_from_messages"]
+    (session,) = asyncio.run(sessions.list_sessions(app_name="travel", user_id="alice")).sessions
+    calls = [c for c in fake.calls if c[0] == "set_from_messages"]
+    sent = [[m["content"] for m in c[1][0]] for c in calls]
     assert sent == [["I prefer aisle seats", "Noted."], ["I fly to Lisbon", "Lisbon, then."]]
+    # ADK's context passes the session, which keys Loom's evidence of each turn.
+    assert [c[2]["session_id"] for c in calls] == [session.id, session.id]
 
 
 def test_extraction_leaves_out_thoughts_tool_calls_and_rewound_turns() -> None:
@@ -275,8 +283,8 @@ def test_events_given_leave_out_a_turn_rewound_among_them() -> None:
     from google.adk.events import Event, EventActions
 
     events = [
-        Event(invocation_id="i1", author="user", content=_model("I live in Lisbon")),
-        Event(invocation_id="i2", author="user", content=_model("Actually Porto")),
+        Event(invocation_id="i1", author="user", content=_user("I live in Lisbon")),
+        Event(invocation_id="i2", author="user", content=_user("Actually Porto")),
         Event(
             invocation_id="i3",
             author="user",
@@ -301,9 +309,21 @@ def test_events_without_text_send_nothing() -> None:
     silent = Event(author="user", content=types.Content(parts=[types.Part(text=" ")]))
     asyncio.run(
         _service(fake, defer=False).add_events_to_memory(
-            app_name="travel", user_id="u", events=[silent]
+            app_name="travel", user_id="u", events=[silent], session_id="s1"
         )
     )
+    assert fake.calls == []
+
+
+def test_events_without_a_session_are_refused() -> None:
+    from google.adk.events import Event
+
+    fake = _FakeMemory()
+    event = Event(author="user", content=_user("I live in Lisbon"))
+    with pytest.raises(ValueError, match="session_id"):
+        asyncio.run(
+            _service(fake).add_events_to_memory(app_name="travel", user_id="u", events=[event])
+        )
     assert fake.calls == []
 
 
@@ -311,9 +331,9 @@ def test_add_memory_writes_content_keyed_memories() -> None:
     fake = _FakeMemory()
     entries = [
         MemoryEntry(
-            content=_model("Alice prefers aisle seats"), timestamp="2026-11-01T09:00:00+00:00"
+            content=_user("Alice prefers aisle seats"), timestamp="2026-11-01T09:00:00+00:00"
         ),
-        MemoryEntry(content=_model("  Alice prefers aisle seats ")),
+        MemoryEntry(content=_user("  Alice prefers aisle seats ")),
         MemoryEntry(content=types.Content(parts=[types.Part(text="hidden", thought=True)])),
     ]
     asyncio.run(_service(fake).add_memory(app_name="travel", user_id="alice", memories=entries))
@@ -331,7 +351,7 @@ def test_add_memory_writes_content_keyed_memories() -> None:
 
 def test_a_timestamp_that_is_not_iso_is_no_valid_at() -> None:
     fake = _FakeMemory()
-    entry = MemoryEntry(content=_model("Alice moved to Porto"), timestamp="last spring")
+    entry = MemoryEntry(content=_user("Alice moved to Porto"), timestamp="last spring")
     asyncio.run(_service(fake).add_memory(app_name="travel", user_id="alice", memories=[entry]))
     ((_, _, kw),) = fake.calls
     assert kw["valid_at"] is None
