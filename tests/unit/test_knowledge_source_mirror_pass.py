@@ -181,3 +181,56 @@ def test_a_turn_that_vouches_for_nothing_keeps_the_cycle(
     _turn_with(world, slow_lists, 0)  # every list read, but a write was not in ClickHouse
     assert len(slow_lists["rows"]) == rows
     assert (_own(world)["lists_cursor"], _own(world)["lists_since"]) == kept
+
+
+def test_the_namespace_sources_keep_the_pass_s_own_budget_after_the_mirrors(
+    world: Any, mirror: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    budgets: dict[str, PassBudget] = {}
+    real = source_sync._sync_one
+
+    async def _seen(src: Any, state: Any, run: Any, result: Any) -> Any:
+        budgets[src.name] = run.budget
+        deadlines[src.name] = source_sync._read_deadline(run)
+        return await real(src, state, run, result)
+
+    deadlines: dict[str, float] = {}
+    monkeypatch.setattr(source_sync, "_sync_one", _seen)
+    whole = source_sync._budget()
+    monkeypatch.setattr(source_sync, "_budget", lambda: whole)
+    world.files = _files(1, permissions=READERS)
+    _pass(world, _source(name="notes"), _mirrored())
+    span = whole.stop_after - whole.started
+    assert budgets["decks"].stop_after <= budgets["decks"].started + span / 3 + 1e-6
+    assert budgets["notes"] is whole  # its start and end, whatever the mirrors used
+    pass_end = whole.started + float(settings.knowledge_source_sync_max_pass_seconds)
+    assert deadlines["notes"] == pass_end - source_sync._MINE_MARGIN_S
+
+
+def test_a_cycle_begun_at_a_wrap_keeps_its_start_until_its_own_wrap(
+    world: Any, mirror: Any, slow_lists: dict[str, Any]
+) -> None:
+    for per_turn in (0, 2, 3):  # as above: the third turn wraps and begins a cycle at doc2
+        _turn_with(world, slow_lists, per_turn)
+    began = _own(world)["lists_since"]
+    rows = len(slow_lists["rows"])
+    _turn_with(world, slow_lists, 1)  # doc2 read, doc3 left: before this cycle's wrap
+    assert slow_lists["ids"] == ["doc2"] and len(slow_lists["rows"]) == rows
+    assert _own(world)["lists_since"] == began
+    _turn_with(world, slow_lists, 3)  # doc3, doc4, doc1, then doc2 past the wrap
+    assert slow_lists["ids"] == ["doc3", "doc4", "doc1"]
+    assert slow_lists["rows"][-1] == datetime.fromisoformat(began)
+
+
+def test_a_turn_that_fails_before_it_knows_its_mirror_leaves_the_mirror_s_state(
+    world: Any, mirror: Any, slow_lists: dict[str, Any]
+) -> None:
+    _turn_with(world, slow_lists, 0)
+    _turn_with(world, slow_lists, 2)
+    kept = _own(world)
+    slow_lists.update(per_turn=0, now=0)
+    world.fail_listing = 401
+    world.sources = [_mirrored()]
+    asyncio.run(source_sync.run_sync())
+    assert _own(world) == kept
+    assert _detail(world)["status"] == "credential_invalid"

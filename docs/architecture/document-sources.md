@@ -717,16 +717,17 @@ never writes an older list; a listing row lands only once every document written
 that listing carries a list it read.
 
 A pass runs the listings first, rotating across the mirrored sources, and gives them at
-most a third of the pass deadline (`knowledge_source_sync_max_pass_seconds`), while the
-namespace sources' content starts at a fixed point of the pass whatever the listings
-used, so their progress says nothing about a mirror's size; a listing that does not
-finish goes on from its cursor in the next pass, and until it completes the source's
-listing row keeps its older start, so a large source needs a stale bound longer than the
-time to list it all. `inspect` and `loom doctor` report each source's oldest listing
-start, a mirrored source's to a platform admin only (its connected owner sees fresh or
-stale). A stopped sync hides every mirrored document once the stale bound passes. The
-implementing pull request measures the writes of a crawl over 2000 people and puts the
-figures here.
+most a third of the pass deadline (`knowledge_source_sync_max_pass_seconds`) and their
+own document bound, while the namespace sources then have the rest of the pass, two
+thirds or more, under theirs, so the documents they write say nothing about a mirror's
+size (when they start does, which is timing and out of scope, as the threat model says);
+a listing that does not finish goes on from its cursor in the next pass, and until it
+completes the source's listing row keeps its older start, so a large source needs a
+stale bound longer than the time to list it all. `inspect` and `loom doctor` report each
+source's oldest listing start, a mirrored source's to a platform admin only (its
+connected owner sees fresh or stale). A stopped sync hides every mirrored document once
+the stale bound passes. The implementing pull request measures the writes of a crawl
+over 2000 people and puts the figures here.
 
 How lists from several accounts of one source, a person a crawl stops reading, a stopped
 source's rows, and restores of either store are handled is the implementing pull

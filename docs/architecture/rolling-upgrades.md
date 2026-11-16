@@ -810,16 +810,15 @@ schema. These rules keep that safe. The operator procedure is in
 55. **The mirrored sources' share of a pass**: N runs the mirrored sources first, in at
     most a third of the pass and under their own document bound
     (`LOOM_KNOWLEDGE_SOURCE_MIRROR_DOCUMENTS_PER_PASS`), those asked to sync first and
-    then the one synced longest ago; the namespace sources then get two thirds of the
-    pass whatever the mirrors used, or the whole pass when no mirrored source runs. A
-    mirrored source's turn keeps its own state under its mirror and source id, leaves
-    only its request, status and time in the namespace row, spends as the mirror, and
-    reads the lists on from a cursor in that state; a cycle's listing row carries the
-    start of the turn that began it. N-1 runs a mirrored source under the whole pass's
-    bounds and keeps its whole state in the namespace row; N reads neither N-1's fields
-    there nor N-1 the mirror row, so a mixed fleet reads some lists again and retries
-    some waits, and the next N turn drops N-1's fields from the namespace row. No
-    request can add a mirrored source yet.
+    then the one synced longest ago; the namespace sources then have the rest of the
+    pass, two thirds or more, under their own bound. A mirrored source's turn keeps its
+    own state under its mirror and source id, leaves only its request, status and time
+    in the namespace row, spends as the mirror, and reads the lists on from a cursor in
+    that state; a cycle's listing row carries the start of the turn that began it. N-1
+    runs a mirrored source under the whole pass's bounds and keeps its whole state in
+    the namespace row; N reads neither N-1's fields there nor N-1 the mirror row, so a
+    mixed fleet reads some lists again and retries some waits, and the next N turn drops
+    N-1's fields from the namespace row. No request can add a mirrored source yet.
     `tests/unit/test_knowledge_source_mirror_pass.py` checks N's side.
 
 ## What checks them

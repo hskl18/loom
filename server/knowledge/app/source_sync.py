@@ -9,10 +9,10 @@ bookkeeping goes in `TurnResult.kind_state`, which the sync state keeps.
 
 A pass reads the active sources and drops those whose namespace is inactive. The
 mirrored sources go first, in at most a third of the pass and under their own document
-bound (`_sync_mirrored`); the namespace sources then have the rest. Sources a
-namespace's admin asked to sync (`sync_now`) go first, the rest from where the previous
-pass stopped. Each source's turn holds the source's own lease,
-so two copies of the worker never sync it at once.
+bound (`_sync_mirrored`); the namespace sources then have the rest of the pass. Sources
+a namespace's admin asked to sync (`sync_now`) go first, the rest from where the
+previous pass stopped. Each source's turn holds the source's own lease, so two copies of
+the worker never sync it at once.
 
 A turn lists the source's files: every file on its first turn, when asked (`full`) and
 once `knowledge_source_sync_full_interval_seconds` have passed since the last full
@@ -362,10 +362,9 @@ async def run_sync(
     states = await _states(usable)
     mirrored = [s for s in usable if mirror_synced(s)]
     if mirrored:
+        # At most a third of the pass, so the namespace sources keep two thirds or more
+        # of the pass's own budget, and their document bound is their own.
         await _sync_mirrored(mirrored, states, run.budget, result)
-        # The namespace sources' share starts here whatever the mirrors used, so their
-        # progress says nothing about a mirror's size.
-        run.budget = _leg(run.budget, 1 - _MIRROR_SHARE)
     usable = [s for s in usable if not mirror_synced(s)]
     asked = sorted(
         (s for s in usable if _requested(states, s)),
@@ -1318,19 +1317,7 @@ async def _write_state(src: KnowledgeSource, read: dict[str, str], turn: TurnRes
             return
         asked = json_object(read.get("detail", "")).get("requested_at")
         now = _now_iso()
-        detail.update(
-            last_synced_at=now,
-            status=turn.status,
-            documents_seen=turn.documents_seen,
-            changed=turn.changed,
-            removed=turn.removed,
-            unconverted=turn.unconverted,
-            unconverted_reasons=turn.reasons,
-            skipped=turn.skipped,
-            error=turn.error or turn.state_error,
-        )
-        detail.update(turn.kind_state)
-        _record_waits(detail, turn)
+        _record_turn(detail, turn, now)
         stamp = current.get("state_value", "")
         if turn.complete:
             # A change made after this listing is stamped later than anything it saw.
@@ -1343,7 +1330,20 @@ async def _write_state(src: KnowledgeSource, read: dict[str, str], turn: TurnRes
         await store.write_state(src.org, src.namespace, src.name, state_value=stamp, detail=detail)
 
 
-def _record_waits(detail: dict[str, Any], turn: TurnResult) -> None:
+def _record_turn(detail: dict[str, Any], turn: TurnResult, now: str) -> None:
+    """What a turn did, into the sync state `detail` it is written with."""
+    detail.update(
+        last_synced_at=now,
+        status=turn.status,
+        documents_seen=turn.documents_seen,
+        changed=turn.changed,
+        removed=turn.removed,
+        unconverted=turn.unconverted,
+        unconverted_reasons=turn.reasons,
+        skipped=turn.skipped,
+        error=turn.error or turn.state_error,
+    )
+    detail.update(turn.kind_state)
     if turn.waits_read:
         detail["file_waits"] = turn.waits
         if turn.waits_reset_for:
@@ -1378,19 +1378,7 @@ async def _write_mirrored_state(
         shown.pop("full", None)
     if turn.mirror:
         detail = json_object(mirror_row.get("detail", ""))
-        detail.update(
-            last_synced_at=now,
-            status=turn.status,
-            documents_seen=turn.documents_seen,
-            changed=turn.changed,
-            removed=turn.removed,
-            unconverted=turn.unconverted,
-            unconverted_reasons=turn.reasons,
-            skipped=turn.skipped,
-            error=turn.error or turn.state_error,
-        )
-        detail.update(turn.kind_state)
-        _record_waits(detail, turn)
+        _record_turn(detail, turn, now)
         if turn.complete and turn.full:
             detail["full_listed_at"] = now
         await store.write_state(src.org, turn.mirror, src.source_id, state_value="", detail=detail)

@@ -3209,7 +3209,7 @@
           "default": 40,
           "minimum": 1,
           "type": "integer",
-          "description": "Documents one pass fetches, writes, retires or mines for decisions across all sources; the rest wait for the next pass."
+          "description": "Documents one pass fetches, writes, retires or mines for decisions across the namespace sources; the rest wait for the next pass."
         },
         "knowledge_source_sync_enabled": {
           "default": false,
