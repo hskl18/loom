@@ -118,7 +118,7 @@ def test_it_is_an_adk_memory_service() -> None:
     assert issubclass(LoomMemoryService, BaseMemoryService)
 
 
-def test_it_refuses_a_sync_agent_a_top_k_out_of_bounds_and_an_empty_prefix() -> None:
+def test_it_refuses_bad_construction() -> None:
     with pytest.raises(TypeError, match="ADK awaits"):
         LoomMemoryService(object.__new__(SyncAgent), app_name="travel")
     for top_k in (0, 501):
@@ -439,3 +439,28 @@ def test_a_real_agent_posts_the_service_calls() -> None:
     assert (extract["user_id"], extract["session_id"]) == ("alice", "s1")
     assert [m["content"] for m in extract["messages"]] == ["I prefer aisle seats"]
     assert write["memory_key"].startswith("adk/") and write["user_id"] == "alice"
+
+
+@pytest.mark.parametrize("user", ["", "-"])
+def test_a_user_id_that_names_no_loom_user_is_refused(user: str) -> None:
+    from google.adk.events import Event
+
+    fake = _FakeMemory()
+    service = _service(fake)
+    entry = MemoryEntry(content=_user("Alice prefers aisle seats"))
+    event = Event(author="user", content=_user("I prefer aisle seats"))
+    from google.adk.sessions import Session
+
+    calls = [
+        service.add_session_to_memory(Session(id="s", app_name="travel", user_id=user)),
+        service.search_memory(app_name="travel", user_id=user, query="seat"),
+        service.add_memory(app_name="travel", user_id=user, memories=[entry]),
+        service.add_events_to_memory(
+            app_name="travel", user_id=user, events=[event], session_id="s1"
+        ),
+        service.delete_memory(app_name="travel", user_id=user, memory_id="adk/1"),
+    ]
+    for call in calls:
+        with pytest.raises(ValueError, match="names none"):
+            asyncio.run(call)
+    assert fake.calls == []

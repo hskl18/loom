@@ -384,8 +384,9 @@ matches a memory of the namespace merges into it, whichever agent wrote that mem
 apps sharing a namespace would share and lose memories. A service therefore serves one ADK
 app, named by `app_name`, in the namespace of its Loom agent, and refuses a call for
 another app; give each app its own namespace and service. The ADK user is the Loom
-`user_id`. Extraction runs under the ADK session, which keys Loom's record of the turns,
-and a search reads all of the user's memories in the namespace, from every session.
+`user_id`; an empty or `-` user, which names no user in Loom, raises `ValueError`.
+Extraction runs under the ADK session, which keys Loom's record of the turns, and a search
+reads all of the user's memories in the namespace, from every session.
 
 | ADK                     | Loom                                                                                                                                                                                                                                                                                                                                |
 | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

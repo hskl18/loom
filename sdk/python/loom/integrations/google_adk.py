@@ -66,24 +66,11 @@ if TYPE_CHECKING:
 class LoomMemoryService(BaseMemoryService):
     """ADK ``BaseMemoryService`` over a Loom ``Agent``, for one ADK app.
 
-    ``add_session_to_memory`` and ``add_events_to_memory`` send the text of the
-    events to ``memory.set_from_messages``, where Loom extracts the facts and
-    resolves duplicates and conflicts; a session added again is extracted
-    again, so a callback that runs every turn should add only that turn's
-    events; ``add_events_to_memory`` needs the ``session_id``, which ADK's
-    callback context passes. Events a rewind took back are left out; a turn
-    saved before a later rewind keeps its memories, which the app deletes by
-    the ids a search returns. ``add_memory`` writes each entry with
-    ``memory.set`` under a key derived from the user and the text
-    (``<key_prefix>/<first 20 hex of sha256>``), its ``timestamp`` as the
-    memory's ``valid_at`` when it is ISO 8601. ``search_memory`` runs
-    ``memory.search`` of the user's memories; with ``honour_abstain`` it leaves
-    out memories below Loom's floor and returns nothing when Loom abstains. A
-    returned memory's ``id`` is the Loom key ``delete_memory`` deletes. A
-    verbatim chunk of a conversation or a session summary has no ``id``: no
-    key deletes it, and Loom's erasure removes it. ``custom_metadata``, and an
-    entry's ``author`` and ``id``, are not kept. ADK awaits its memory service,
-    so the service takes a ``loom.Agent``.
+    Saved sessions and turns go to ``memory.set_from_messages``, ``add_memory`` to
+    ``memory.set`` and ``search_memory`` to ``memory.search`` of the ADK user's
+    memories; a returned memory's ``id`` is the key ``delete_memory`` deletes. ADK
+    awaits its memory service, so the service takes a ``loom.Agent``. The mapping of
+    each method is in ``docs/features/integrations/frameworks.md`` (Google ADK).
     """
 
     def __init__(
@@ -113,7 +100,7 @@ class LoomMemoryService(BaseMemoryService):
         self._key_prefix = key_prefix
 
     async def add_session_to_memory(self, session: Session) -> None:
-        self._check_app(session.app_name)
+        self._check(session.app_name, session.user_id)
         await self._extract(session.user_id, session.id, get_active_events(session.events))
 
     async def add_events_to_memory(
@@ -125,7 +112,7 @@ class LoomMemoryService(BaseMemoryService):
         session_id: str | None = None,
         custom_metadata: Mapping[str, object] | None = None,
     ) -> None:
-        self._check_app(app_name)
+        self._check(app_name, user_id)
         if not session_id:
             # Loom keys a turn's chunks and summary by session, not by user.
             raise ValueError("add_events_to_memory needs the ADK session_id")
@@ -139,7 +126,7 @@ class LoomMemoryService(BaseMemoryService):
         memories: Sequence[MemoryEntry],
         custom_metadata: Mapping[str, object] | None = None,
     ) -> None:
-        self._check_app(app_name)
+        self._check(app_name, user_id)
         for memory in memories:
             text = _text(memory.content)
             if not text:
@@ -156,7 +143,7 @@ class LoomMemoryService(BaseMemoryService):
     async def search_memory(
         self, *, app_name: str, user_id: str, query: str
     ) -> SearchMemoryResponse:
-        self._check_app(app_name)
+        self._check(app_name, user_id)
         if not query.strip():
             return SearchMemoryResponse()
         result = await self._agent.memory.search(
@@ -195,12 +182,12 @@ class LoomMemoryService(BaseMemoryService):
     async def delete_memory(
         self, *, app_name: str, user_id: str, memory_id: str | None = None
     ) -> None:
-        self._check_app(app_name)
+        self._check(app_name, user_id)
         if not memory_id:
             raise ValueError("delete_memory needs the memory_id a search returned")
         await self._agent.memory.delete(memory_id, user_id=user_id)
 
-    def _check_app(self, app_name: str) -> None:
+    def _check(self, app_name: str, user_id: str) -> None:
         # Loom merges a write into a matching memory of the namespace whichever agent
         # wrote it, so two apps in one namespace would share and lose memories.
         if app_name != self._app_name:
@@ -208,6 +195,9 @@ class LoomMemoryService(BaseMemoryService):
                 f"this LoomMemoryService serves the ADK app {self._app_name!r}, not "
                 f"{app_name!r}: give each app its own Loom namespace and service"
             )
+        # In Loom an empty or "-" user is no user: writes would land outside the user's reads.
+        if user_id in ("", "-"):
+            raise ValueError(f"an ADK user_id names a Loom user; {user_id!r} names none")
 
     async def _extract(self, user_id: str, session_id: str, events: Sequence[Event]) -> None:
         messages: list[dict[str, object]] = []
