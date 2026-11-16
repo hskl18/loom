@@ -84,12 +84,16 @@ async def test_a_saved_turn_reaches_a_later_prompt(agent) -> None:
     for memory_id in facts:
         await service.delete_memory(app_name="travel", user_id="alice", memory_id=memory_id)
     found = await service.search_memory(app_name="travel", user_id="alice", query="Lisbon")
-    assert not {m.id for m in found.memories if m.custom_metadata["source"] == "fact"} & facts
+    # The deleted facts do not come back.
+    assert not {m.id for m in found.memories} & facts
 
 
 async def test_add_memory_then_delete_by_id(agent) -> None:
     service = LoomMemoryService(agent, app_name="travel", honour_abstain=False)
-    entry = MemoryEntry(content=types.Content(parts=[types.Part(text="Alice prefers aisle seats")]))
+    entry = MemoryEntry(
+        content=types.Content(parts=[types.Part(text="Alice prefers aisle seats")]),
+        timestamp="2026-03-01T09:00:00+00:00",
+    )
     await service.add_memory(app_name="travel", user_id="alice", memories=[entry])
 
     async def ids(user: str) -> list[str | None]:
@@ -98,6 +102,16 @@ async def test_add_memory_then_delete_by_id(agent) -> None:
 
     await eventually(lambda: ids("alice"), description="the memory found")
     (memory_id,) = await ids("alice")
+    assert memory_id is not None
+    row = await agent.memory.get(memory_id, user_id="alice")
+    assert row is not None
+    assert (row["value"], row["agent"], row["user_id"], row["session_id"]) == (
+        "Alice prefers aisle seats",
+        agent.agent,
+        "alice",
+        "-",
+    )
+    assert row["valid_at"].startswith("2026-03-01")
     await service.delete_memory(app_name="travel", user_id="bob", memory_id=memory_id)
     assert await ids("alice") == [memory_id]  # another user's delete reaches nothing
     await service.delete_memory(app_name="travel", user_id="alice", memory_id=memory_id)

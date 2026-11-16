@@ -33,8 +33,8 @@ service a ``Runner`` takes as ``memory_service=``. ADK's memory tools read it:
 
 ADK scopes memory by app and user. Loom's boundary is the namespace, so a
 service serves one ADK app, the namespace of its Loom agent, and refuses a
-call for another app; the ADK user is the Loom ``user_id``. ADK's memory
-spans sessions, so rows carry no session. Install with
+call for another app; the ADK user is the Loom ``user_id``, and extraction
+runs under the ADK session. Install with
 ``pip install 'clickhouse-loom[google-adk]'``.
 """
 
@@ -61,7 +61,6 @@ from loom.sync import SyncAgent
 
 if TYPE_CHECKING:
     from loom.agent import Agent
-    from loom.memory import MemorySearchHit
 
 
 class LoomMemoryService(BaseMemoryService):
@@ -71,17 +70,19 @@ class LoomMemoryService(BaseMemoryService):
     events to ``memory.set_from_messages``, where Loom extracts the facts and
     resolves duplicates and conflicts; a session added again is extracted
     again, so a callback that runs every turn should add only that turn's
-    events. Events a rewind took back are left out. ``add_memory`` writes each
-    entry with ``memory.set`` under a key derived from its text
+    events. Events a rewind took back are left out; a turn saved before a
+    later rewind keeps its memories, which the app deletes by the ids a search
+    returns. ``add_memory`` writes each entry with ``memory.set`` under a key
+    derived from the user and the text
     (``<key_prefix>/<first 20 hex of sha256>``), its ``timestamp`` as the
     memory's ``valid_at`` when it is ISO 8601. ``search_memory`` runs
-    ``memory.search`` of the namespace; with ``honour_abstain`` it leaves out
-    memories below Loom's floor and returns nothing when Loom abstains. A
-    returned entry's ``id`` is the Loom key ``delete_memory`` deletes: the
-    memory's, or for a verbatim chunk the memory it was written under. An
-    entry Loom cannot delete by key, such as a session summary, has no ``id``;
-    Loom's erasure removes it. ``custom_metadata`` is not kept. ADK awaits its
-    memory service, so the service takes a ``loom.Agent``.
+    ``memory.search`` of the user's memories; with ``honour_abstain`` it leaves
+    out memories below Loom's floor and returns nothing when Loom abstains. A
+    returned memory's ``id`` is the Loom key ``delete_memory`` deletes. A
+    verbatim chunk of a conversation or a session summary has no ``id``: no
+    key deletes it, and Loom's erasure removes it. ``custom_metadata``, and an
+    entry's ``author`` and ``id``, are not kept. ADK awaits its memory service,
+    so the service takes a ``loom.Agent``.
     """
 
     def __init__(
@@ -112,7 +113,7 @@ class LoomMemoryService(BaseMemoryService):
 
     async def add_session_to_memory(self, session: Session) -> None:
         self._check_app(session.app_name)
-        await self._extract(session.user_id, get_active_events(session.events))
+        await self._extract(session.user_id, session.id, get_active_events(session.events))
 
     async def add_events_to_memory(
         self,
@@ -124,7 +125,7 @@ class LoomMemoryService(BaseMemoryService):
         custom_metadata: Mapping[str, object] | None = None,
     ) -> None:
         self._check_app(app_name)
-        await self._extract(user_id, events)
+        await self._extract(user_id, session_id, get_active_events(list(events)))
 
     async def add_memory(
         self,
@@ -139,7 +140,8 @@ class LoomMemoryService(BaseMemoryService):
             text = _text(memory.content)
             if not text:
                 continue
-            digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:20]
+            # The user is in the key: Loom files a long value's passages by key alone.
+            digest = hashlib.sha256(f"{user_id}\0{text}".encode()).hexdigest()[:20]
             await self._agent.memory.set(
                 f"{self._key_prefix}/{digest}",
                 text,
@@ -159,8 +161,8 @@ class LoomMemoryService(BaseMemoryService):
             user_id=user_id,
             # Read the namespace this service writes to, whatever the deployment's default.
             namespace_scope="this",
-            # Unpinned, a large top_k serves excerpts (above 15 by default)
-            # and drops each hit's explanation.
+            # Pinned so every top_k gets full bodies and no per-hit explanation
+            # (the server's defaults switch at 15).
             bodies="full",
             explain=False,
         )
@@ -173,7 +175,8 @@ class LoomMemoryService(BaseMemoryService):
         return SearchMemoryResponse(
             memories=[
                 MemoryEntry(
-                    id=_deletable_key(hit),
+                    # Only a memory has a key memory.delete takes.
+                    id=hit.memory_key if hit.source == "fact" else None,
                     content=types.Content(
                         role="user", parts=[types.Part(text=hit.content_excerpt)]
                     ),
@@ -202,7 +205,7 @@ class LoomMemoryService(BaseMemoryService):
                 f"{app_name!r}: give each app its own Loom namespace and service"
             )
 
-    async def _extract(self, user_id: str, events: Sequence[Event]) -> None:
+    async def _extract(self, user_id: str, session_id: str | None, events: Sequence[Event]) -> None:
         messages: list[dict[str, object]] = []
         for event in events:
             text = _text(event.content)
@@ -215,13 +218,11 @@ class LoomMemoryService(BaseMemoryService):
                     }
                 )
         if messages:
-            await self._agent.memory.set_from_messages(messages, user_id=user_id, defer=self._defer)
-
-
-def _deletable_key(hit: MemorySearchHit) -> str | None:
-    if hit.source == "fact":
-        return hit.memory_key
-    return hit.parent_memory_key or None
+            # The session keys Loom's evidence of the turns (chunks, summary), so
+            # it is sent; without one, every user's evidence shares one key.
+            await self._agent.memory.set_from_messages(
+                messages, user_id=user_id, session_id=session_id, defer=self._defer
+            )
 
 
 def _iso_time(text: str | None) -> datetime | None:

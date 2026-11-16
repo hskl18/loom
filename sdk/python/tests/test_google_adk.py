@@ -199,7 +199,10 @@ def test_a_saved_session_goes_to_extraction() -> None:
         await callback_context.add_session_to_memory()
 
     llm = _ScriptedLlm(script=[_model("Noted.")])
-    asyncio.run(_run(_service(fake), llm, "I prefer aisle seats", after_agent_callback=save))
+    sessions = asyncio.run(
+        _run(_service(fake), llm, "I prefer aisle seats", after_agent_callback=save)
+    )
+    (session,) = asyncio.run(sessions.list_sessions(app_name="travel", user_id="alice")).sessions
     (extract,) = [c for c in fake.calls if c[0] == "set_from_messages"]
     messages = extract[1][0]
     assert [(m["role"], m["content"]) for m in messages] == [
@@ -207,8 +210,8 @@ def test_a_saved_session_goes_to_extraction() -> None:
         ("assistant", "Noted."),
     ]
     assert all(str(m["timestamp"]).endswith("+00:00") for m in messages)
-    # ADK's memory spans sessions: the rows carry none, so a delete can address them.
-    assert extract[2] == {"user_id": "alice", "defer": True}
+    # The session keys Loom's evidence of the turns.
+    assert extract[2] == {"user_id": "alice", "session_id": session.id, "defer": True}
 
 
 def test_the_documented_turn_callback_sends_each_turn_once() -> None:
@@ -268,6 +271,29 @@ def test_extraction_leaves_out_thoughts_tool_calls_and_rewound_turns() -> None:
     assert [m["content"] for m in extract[1][0]] == ["I live in Lisbon", "Lisbon it is"]
 
 
+def test_events_given_leave_out_a_turn_rewound_among_them() -> None:
+    from google.adk.events import Event, EventActions
+
+    events = [
+        Event(invocation_id="i1", author="user", content=_model("I live in Lisbon")),
+        Event(invocation_id="i2", author="user", content=_model("Actually Porto")),
+        Event(
+            invocation_id="i3",
+            author="user",
+            actions=EventActions(rewind_before_invocation_id="i2"),
+        ),
+    ]
+    fake = _FakeMemory()
+    asyncio.run(
+        _service(fake).add_events_to_memory(
+            app_name="travel", user_id="alice", events=events, session_id="s1"
+        )
+    )
+    ((_, (messages,), kw),) = fake.calls
+    assert [m["content"] for m in messages] == ["I live in Lisbon"]
+    assert kw["session_id"] == "s1"
+
+
 def test_events_without_text_send_nothing() -> None:
     from google.adk.events import Event
 
@@ -295,6 +321,10 @@ def test_add_memory_writes_content_keyed_memories() -> None:
     assert first[1][0] == again[1][0] and first[1][0].startswith("adk/")
     assert first[1][1] == "Alice prefers aisle seats"
     assert first[2]["user_id"] == "alice"
+    # The user is in the key: Loom files a long value's passages by key alone.
+    bob = _FakeMemory()
+    asyncio.run(_service(bob).add_memory(app_name="travel", user_id="bob", memories=entries[:1]))
+    assert bob.calls[0][1][0] != first[1][0]
     assert first[2]["valid_at"].isoformat() == "2026-11-01T09:00:00+00:00"
     assert again[2]["valid_at"] is None
 
@@ -343,5 +373,5 @@ def test_an_entry_id_is_the_key_delete_memory_deletes() -> None:
     found = asyncio.run(
         _service(_FakeMemory(hits)).search_memory(app_name="travel", user_id="u", query="q")
     )
-    assert [m.id for m in found.memories] == ["adk/1", "adk/1", None]
+    assert [m.id for m in found.memories] == ["adk/1", None, None]
     assert [m.custom_metadata["source"] for m in found.memories] == ["fact", "chunk", "summary"]
