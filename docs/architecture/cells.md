@@ -1099,12 +1099,14 @@ Then, in order (the step numbers are the ones the rest of this page uses):
   `enforced`; then `attach/serving`.
 
 `--wait` (default 10 minutes) is the wall time the bounded waits share, each lock try
-included and never longer than what is left; `--scan-budget` (default 2 hours) bounds each
-full scan, which `--wait` does not count. `--dry-run` runs the refusals and the scan, prints
-what would be placed and skipped and the scan's time, and writes nothing; the router's
-checks at `attach/begin` do not run. On a `serving` row attach reads the cell's mode:
-`enforced` is done (exit 0), and any other mode refuses: the directory and the cell's
-Postgres disagree, as after a restore of one of them, and attach lowers and repairs neither.
+included and never longer than what is left, but for a floor of 100 ms: every try runs once
+before the wait is judged spent, so `--wait 0` is one try of each wait with no retry;
+`--scan-budget` (default 2 hours) bounds each full scan, which `--wait` does not count.
+`--dry-run` runs the refusals and the scan, prints what would be placed and skipped and the
+scan's time, and writes nothing; the router's checks at `attach/begin` do not run. On a
+`serving` row attach reads the cell's mode: `enforced` is done (exit 0), and any other mode
+refuses: the directory and the cell's Postgres disagree, as after a restore of one of them,
+and attach lowers and repairs neither.
 
 A later cell is attached only once the first is `serving`. It must hold no org data
 (attach refuses otherwise) and starts in `enforced`. Its attach runs, in order: the
@@ -1487,58 +1489,58 @@ An integration test with two cells and a router in CI's Postgres job:
   between prepare and attach, keeps serving on a first cell in `recording`, and keeps the
   last mode it read through a failed read, `recording` included; a CLI command declaring an
   org with it unset is refused on an `enforced` or `partial` cell, an org-free one (a token
-  revocation) runs, also with Postgres down on a deployment never prepared, and a `loom
-cell` store command refuses; `loom cell limit --closed` succeeds with the cell's Postgres
-  down; after `loom cell credential --cell <cell> --next` both credentials place and read
-  state, `--finish` refuses the old credential, for a cell finished before its pods hold the
-  new one the router refuses its calls with 401, its request answers 503 writing nothing,
-  and it recovers by recording the old hash again, `--revert` drops a pending `next`, which
-  is then refused, and the old credential keeps placing, and a second `--next` while one is
-  pending and a hash another cell records as current or next are refused; `loom cell limit`
-  and `loom cell credential --next`, `--finish` and `--revert` refuse while the directory is
-  unavailable; concurrent placements at one under `placements_max` across two router
-  replicas write one; a CLI command declaring an org with `LOOM_CELL_ROUTER_TOKEN` set
-  refuses, naming it, on a first cell once it is `enforced` (`attaching` included) and on a
-  later cell, and on a first cell in `recording` runs and records the org; attach with
-  `placements_max` below the orgs the first cell holds places them all, and a later cell's
-  attach past its quota or closed refuses, naming the org; a first cell with `--closed` and
-  `placements_max` set before step 2 attaches, and an org a request records between step 2
-  and `enforced` is placed by step 4 with no 503; after step 3's write of the cell's mode, a
-  process whose cache still reads `recording` sends a new org's request to the placement
-  call, which a closed cell answers 503; a CLI command whose insert finds `enforced`
-  refuses, naming the org, and makes no placement call; a refusal after step 3's write
-  leaves the cell `enforced` and `attaching`, where a new org is placed through the gate;
-  each ordering of attach's write of the mode with a recording insert holds as stated above
-  (running, starting during the write, a stream of overlapping inserts each shorter than a
-  try, with attach setting `enforced` within a try or two, held across several tries, held
-  past `--wait` (attach refuses, the cell still `recording`), a stalled attach, a commit cut
-  off by its timeout, and a commit whose connection is lost while it waits for the standby,
-  which the durable read decides); a `REPEATABLE READ` transaction whose first statement ran
-  before `enforced` committed, on attach's role or a second role, holds step 4 until it ends
-  and its write of an unheld org is then placed, one whose first statement ran after is
-  refused by the trigger, a transaction that starts after attach takes the lock but before
-  its commit is visible holds step 4, a transaction opened in `recording` that outlives one
-  run's `--wait` holds the rerun's step 4 after a refusal, an autovacuum worker on a loom
-  table does not hold step 4 and a background worker with a transaction open since
-  `recording` does, a prepared transaction (after a restart with `max_prepared_transactions`
-  raised during the wait) makes step 4 refuse at once, naming it, with the mode still
-  `enforced` and a rerun refused until it is resolved and the setting is back to 0, a write
-  transaction open in a second database on the same server holds step 4 and is named, a long
-  read on the synchronous standby, or on a second standby, with `hot_standby_feedback` on
-  does not hold it, nor does a base backup running across it, a write held open on a
-  `replication=database` connection holds step 4, and so does a `REPEATABLE READ`
-  transaction on one, opened in `recording` and writing nothing before `enforced`, a long
-  logical dump (a `REPEATABLE READ` read-only transaction) on the cell's database past
-  `--wait` makes step 4 refuse, naming it, with the cell left `enforced`, and the first
-  cell's attach without `pg_read_all_stats` or with `max_prepared_transactions` above 0
-  refuses before step 1 with the mode still `recording`, while a later cell's attach does
-  not require either; a missing or disabled org trigger is refused by attach and named by
-  `loom doctor`, a write for an unheld org on an `enforced` cell whose mode row was deleted
-  is refused and the state named by `loom doctor`; on that cell a pod with `LOOM_CELL` unset
-  is unready and runs no worker, and a CLI command declaring an org with it unset is
-  refused, as a pod is; updating, deleting or truncating the `first` row on an `enforced`
-  cell is refused, also under `session_replication_role = replica`, and a missing or
-  disabled `first`-row trigger is refused by attach and named by `loom doctor`; a running
+  revocation) runs, also with Postgres down on a deployment never prepared, and a
+  `loom cell` store command refuses; `loom cell limit --closed` succeeds with the cell's
+  Postgres down; after `loom cell credential --cell <cell> --next` both credentials place
+  and read state, `--finish` refuses the old credential, for a cell finished before its pods
+  hold the new one the router refuses its calls with 401, its request answers 503 writing
+  nothing, and it recovers by recording the old hash again, `--revert` drops a pending
+  `next`, which is then refused, and the old credential keeps placing, and a second `--next`
+  while one is pending and a hash another cell records as current or next are refused;
+  `loom cell limit` and `loom cell credential --next`, `--finish` and `--revert` refuse
+  while the directory is unavailable; concurrent placements at one under `placements_max`
+  across two router replicas write one; a CLI command declaring an org with
+  `LOOM_CELL_ROUTER_TOKEN` set refuses, naming it, on a first cell once it is `enforced`
+  (`attaching` included) and on a later cell, and on a first cell in `recording` runs and
+  records the org; attach with `placements_max` below the orgs the first cell holds places
+  them all, and a later cell's attach past its quota or closed refuses, naming the org; a
+  first cell with `--closed` and `placements_max` set before step 2 attaches, and an org a
+  request records between step 2 and `enforced` is placed by step 4 with no 503; after step
+  3's write of the cell's mode, a process whose cache still reads `recording` sends a new
+  org's request to the placement call, which a closed cell answers 503; a CLI command whose
+  insert finds `enforced` refuses, naming the org, and makes no placement call; a refusal
+  after step 3's write leaves the cell `enforced` and `attaching`, where a new org is placed
+  through the gate; each ordering of attach's write of the mode with a recording insert
+  holds as stated above (running, starting during the write, a stream of overlapping inserts
+  each shorter than a try, with attach setting `enforced` within a try or two, held across
+  several tries, held past `--wait` (attach refuses, the cell still `recording`), a stalled
+  attach, a commit cut off by its timeout, and a commit whose connection is lost while it
+  waits for the standby, which the durable read decides); a `REPEATABLE READ` transaction
+  whose first statement ran before `enforced` committed, on attach's role or a second role,
+  holds step 4 until it ends and its write of an unheld org is then placed, one whose first
+  statement ran after is refused by the trigger, a transaction that starts after attach
+  takes the lock but before its commit is visible holds step 4, a transaction opened in
+  `recording` that outlives one run's `--wait` holds the rerun's step 4 after a refusal, an
+  autovacuum worker on a loom table does not hold step 4 and a background worker with a
+  transaction open since `recording` does, a prepared transaction (after a restart with
+  `max_prepared_transactions` raised during the wait) makes step 4 refuse at once, naming
+  it, with the mode still `enforced` and a rerun refused until it is resolved and the
+  setting is back to 0, a write transaction open in a second database on the same server
+  holds step 4 and is named, a long read on the synchronous standby, or on a second standby,
+  with `hot_standby_feedback` on does not hold it, nor does a base backup running across it,
+  a write held open on a `replication=database` connection holds step 4, and so does a
+  `REPEATABLE READ` transaction on one, opened in `recording` and writing nothing before
+  `enforced`, a long logical dump (a `REPEATABLE READ` read-only transaction) on the cell's
+  database past `--wait` makes step 4 refuse, naming it, with the cell left `enforced`, and
+  the first cell's attach without `pg_read_all_stats` or with `max_prepared_transactions`
+  above 0 refuses before step 1 with the mode still `recording`, while a later cell's attach
+  does not require either; a missing or disabled org trigger is refused by attach and named
+  by `loom doctor`, a write for an unheld org on an `enforced` cell whose mode row was
+  deleted is refused and the state named by `loom doctor`; on that cell a pod with
+  `LOOM_CELL` unset is unready and runs no worker, and a CLI command declaring an org with
+  it unset is refused, as a pod is; updating, deleting or truncating the `first` row on an
+  `enforced` cell is refused, also under `session_replication_role = replica`, and a missing
+  or disabled `first`-row trigger is refused by attach and named by `loom doctor`; a running
   process with `LOOM_CELL` set on a cell whose mode row is removed answers 503 to a bearer
   request and runs no worker pass, and serves again after a rerun of `loom cell prepare`
   writes the row back while it runs; a cell the directory registers with no state, tenancy
@@ -1548,12 +1550,12 @@ cell` store command refuses; `loom cell limit --closed` succeeds with the cell's
   rerun; a cell with both rows absent beside a tenancy row, and one beside only its own row,
   has the function refuse an unheld org (a boot creates no trigger there), every process
   gated and `loom doctor` naming it, and a prepare rerun writes the rows back; a
-  Postgres-only restore of an attached first cell to before its prepare is named by `loom
-doctor` and closed by `loom cell restore`; a prepare rerun during a pending `loom cell
-update` on an attached cell, with processes on both values and `loom.cell_self` lost,
-  writes both values back and keeps both sets of processes serving, and one before attach
-  refuses the two configurations; a prepare rerun on an attached cell whose `current` is
-  missing and whose pods' configuration differs from the directory row refuses, and one
+  Postgres-only restore of an attached first cell to before its prepare is named by
+  `loom doctor` and closed by `loom cell restore`; a prepare rerun during a pending
+  `loom cell update` on an attached cell, with processes on both values and `loom.cell_self`
+  lost, writes both values back and keeps both sets of processes serving, and one before
+  attach refuses the two configurations; a prepare rerun on an attached cell whose `current`
+  is missing and whose pods' configuration differs from the directory row refuses, and one
   before attach whose heartbeats report another bucket prefix refuses; a prepare rerun given
   a credential hash that is neither the row's `current` nor its `next` is refused; a prepare
   rerun on a `serving` later cell whose prefix holds data writes a removed mode row back; a
@@ -1561,33 +1563,34 @@ update` on an attached cell, with processes on both values and `loom.cell_self` 
   creates no trigger there), every process gated and `loom doctor` naming it, and a prepare
   rerun writes the row back; a later cell whose mode row is set to `recording` records
   nothing, its trigger refuses an unheld org, a process with `LOOM_CELL` set there serves as
-  in `enforced`, a pod with `LOOM_CELL` unset there is unready and runs no worker, `loom
-cell prepare` names the row, a CLI command declaring an org with `LOOM_CELL_ROUTER_TOKEN`
-  set refuses, naming it, and the router refuses its state read; a build N-1 process's
-  `memory.set` and delivery pass on a never-prepared deployment after N's migration succeed
-  and write no tenancy row, and on the first cell in `recording` a boot creates no org
-  trigger, and one created by hand reads the state and looks nothing up, a write under
-  `session_replication_role = replica` for an unheld org is skipped (origin triggers), an
-  `INSERT ... ON CONFLICT DO UPDATE` that inserts a row for an unheld org is refused and one
-  that hits an existing row of it is not, a marked session's every write passes, and the
-  triggers on an `enforced` cell cover every table erasure classifies with an `org` column
-  but the three exclusions; and an org-keyed write while attach holds the mode table's lock
-  returns at once, with new-org requests answering within their deadline and mode-cache
-  reads returning at once throughout; a refusal at step 3's lock leaves the cell `recording`
-  with its directory row `enforced`, and the rerun runs step 2 again; a
-  `LOOM_CELL_ROUTER_TOKEN` not of the `lcr_` form is refused at boot and named by `loom
-doctor`; `loom cell credential new` prints a credential of that form and its SHA-256, with
-  the directory and the stores unreachable; prepare and `--next` refuse an argument that is
-  not 64 lowercase hex characters, the credential and its bare 128-character secret
-  included, storing nothing; orgs a first cell records in `recording` with no data are
-  listed by `loom doctor`; a placement flood with no quota set is held to the rate limit at
-  each router replica, `loom doctor` names the cell as one with no quota, and a call refused
-  past it at one replica answers 503 with a `Retry-After` of at most 60 s, after which its
-  retry at that replica, with no other call of the cell admitted between, is admitted; a
-  cell's first prepare, with no directory row yet, passes the deployment-id check; a pod or
-  CLI that lost `LOOM_PG_DSN` or `LOOM_STORAGE_AUTHORITY` on a cell is refused by the
-  authority check; the first cell's existing tokens, refresh tokens and OAuth clients keep
-  working through the cutover, a logout through the shared host revokes its refresh token;
+  in `enforced`, a pod with `LOOM_CELL` unset there is unready and runs no worker,
+  `loom cell prepare` names the row, a CLI command declaring an org with
+  `LOOM_CELL_ROUTER_TOKEN` set refuses, naming it, and the router refuses its state read; a
+  build N-1 process's `memory.set` and delivery pass on a never-prepared deployment after
+  N's migration succeed and write no tenancy row, and on the first cell in `recording` a
+  boot creates no org trigger, and one created by hand reads the state and looks nothing up,
+  a write under `session_replication_role = replica` for an unheld org is skipped (origin
+  triggers), an `INSERT ... ON CONFLICT DO UPDATE` that inserts a row for an unheld org is
+  refused and one that hits an existing row of it is not, a marked session's every write
+  passes, and the triggers on an `enforced` cell cover every table erasure classifies with
+  an `org` column but the three exclusions; and an org-keyed write while attach holds the
+  mode table's lock returns at once, with new-org requests answering within their deadline
+  and mode-cache reads returning at once throughout; a refusal at step 3's lock leaves the
+  cell `recording` with its directory row `enforced`, and the rerun runs step 2 again; a
+  `LOOM_CELL_ROUTER_TOKEN` not of the `lcr_` form is refused at boot and named by
+  `loom doctor`; `loom cell credential new` prints a credential of that form and its
+  SHA-256, with the directory and the stores unreachable; prepare and `--next` refuse an
+  argument that is not 64 lowercase hex characters, the credential and its bare
+  128-character secret included, storing nothing; orgs a first cell records in `recording`
+  with no data are listed by `loom doctor`; a placement flood with no quota set is held to
+  the rate limit at each router replica, `loom doctor` names the cell as one with no quota,
+  and a call refused past it at one replica answers 503 with a `Retry-After` of at most 60
+  s, after which its retry at that replica, with no other call of the cell admitted between,
+  is admitted; a cell's first prepare, with no directory row yet, passes the deployment-id
+  check; a pod or CLI that lost `LOOM_PG_DSN` or `LOOM_STORAGE_AUTHORITY` on a cell is
+  refused by the authority check; the first cell's existing tokens, refresh tokens and OAuth
+  clients keep working through the cutover, a logout through the shared host revokes its
+  refresh token;
 - attach refuses a shared issuer, root secret, Keeper path, nested bucket prefix or
   configured org, a second cell that holds data, and a second attach while one runs;
 - an OIDC sign-in, an MCP client's authorization and a device flow for an org in the

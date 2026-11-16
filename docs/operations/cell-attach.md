@@ -59,14 +59,14 @@ Attach's Postgres role needs `pg_read_all_stats`, `pg_signal_backend`, `USAGE` o
 `loom`, `SELECT` on `loom.cell_first`, `loom.tenancy_mode`, `loom.cell_self`,
 `loom.authority` and every org table, `UPDATE` on `loom.tenancy_mode`, `INSERT` on
 `loom.tenancy`, `SELECT`, `INSERT`, `UPDATE` and `DELETE` on `loom.cell_probe`, `TEMPORARY`
-on the database, `EXECUTE` on `pg_logical_emit_message`, and membership in the owner role
-of `loom.tenancy` and of every guarded table. Its ClickHouse user needs the grants the
-writer check names (`SELECT` on `system.*` and on the configured databases, `SHOW USERS`,
-`SHOW ROLES`, `SHOW ROW POLICIES`, `SHOW TABLES`, `SHOW COLUMNS`, `SYSTEM FLUSH ASYNC INSERT
-QUEUE`, and on a cluster `SYSTEM SYNC REPLICA`, `CLUSTER` and `READ ON REMOTE`), no settings
-profile or quota capping the rows or bytes it reads, and the insert into
-`loom._migration_lock` that writes the probe nonce. The CLI needs write access to the
-bucket's probe object and `LOOM_ROUTER_OPERATOR_TOKEN`.
+on the database, `EXECUTE` on `pg_logical_emit_message`, and membership in the owner role of
+`loom.tenancy` and of every guarded table. Its ClickHouse user needs the grants the writer
+check names (`SELECT` on `system.*` and on the configured databases, `SHOW USERS`,
+`SHOW ROLES`, `SHOW ROW POLICIES`, `SHOW TABLES`, `SHOW COLUMNS`,
+`SYSTEM FLUSH ASYNC INSERT QUEUE`, and on a cluster `SYSTEM SYNC REPLICA`, `CLUSTER` and
+`READ ON REMOTE`), no settings profile or quota capping the rows or bytes it reads, and the
+insert into `loom._migration_lock` that writes the probe nonce. The CLI needs write access
+to the bucket's probe object and `LOOM_ROUTER_OPERATOR_TOKEN`.
 
 ## Run it
 
@@ -80,13 +80,14 @@ loom cell attach --cell <cell> \
 `--dry-run` runs the refusals and step 2's scan, prints the count and a sample of the orgs
 per source table, the ones it would skip, and whether the scan fit in half of
 `--scan-budget`, and writes nothing; the router's own checks at `attach/begin` (the probe,
-the hosts, the upstream) do not run. Name every ClickHouse user, user directory, object
-and replica that may write the configured databases with `--ch-allow-user`,
+the hosts, the upstream) do not run. Name every ClickHouse user, user directory, object and
+replica that may write the configured databases with `--ch-allow-user`,
 `--ch-allow-user-directory`, `--ch-allow-object` and `--ch-allow-replica`, and every
 Postgres role besides attach's own that may make an org held with `--pg-allow-role`; each
-list is audited by the router. `--wait` (default 600 s) bounds the waits together;
-`--scan-budget` (default 7200 s) bounds each full scan, and step 2 must take at most half of
-it, since step 4 reads the same tables again.
+list is audited by the router. `--wait` (default 600 s) is the wall time the waits share;
+every lock try runs at least once, with a lock wait of at least 100 ms, so `--wait 0` runs
+one try of each wait with no retry; `--scan-budget` (default 7200 s) bounds each full scan,
+and step 2 must take at most half of it, since step 4 reads the same tables again.
 
 A refusal names what to fix. Rerun attach after fixing it: every step is idempotent, and a
 rerun resumes by the directory row and the cell's mode. On a `serving` row it prints that it
