@@ -448,11 +448,19 @@ def test_a_real_agent_posts_the_service_calls() -> None:
             app_name="travel", user_id="alice", events=[event], session_id="s1"
         )
         await service.add_memory(app_name="travel", user_id="alice", memories=[entry])
+        await service.delete_memory(
+            app_name="travel", user_id="alice", memory_id=_entry_id("user_seat", "adk-1")
+        )
 
     asyncio.run(calls())
     paths = [p for p, _ in posts]
-    assert paths == ["/v1/memory.search", "/v1/memory.set_from_messages", "/v1/memory.set"]
-    search, extract, write = (body for _, body in posts)
+    assert paths == [
+        "/v1/memory.search",
+        "/v1/memory.set_from_messages",
+        "/v1/memory.set",
+        "/v1/memory.delete",
+    ]
+    search, extract, write, delete = (body for _, body in posts)
     assert (search["query"], search["top_k"], search["user_id"]) == ("seat", 3, "alice")
     assert (search["namespace_scope"], search["bodies"], search["explain"]) == (
         "this",
@@ -462,6 +470,11 @@ def test_a_real_agent_posts_the_service_calls() -> None:
     assert (extract["user_id"], extract["session_id"]) == ("alice", _loom_session("alice", "s1"))
     assert [m["content"] for m in extract["messages"]] == ["I prefer aisle seats"]
     assert write["memory_key"].startswith("adk/") and write["user_id"] == "alice"
+    assert (delete["memory_key"], delete["user_id"], delete["session_id"]) == (
+        "user_seat",
+        "alice",
+        "adk-1",
+    )
 
 
 @pytest.mark.parametrize("user", ["", "-"])
